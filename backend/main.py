@@ -27,25 +27,27 @@ class VideoRequest(BaseModel):
 @app.post("/extract")
 def extract_info(request: VideoRequest, req: Request):
     unique_name = str(uuid.uuid4())
-    
+
+    # 1. Block Generic Home URLs
+    clean_url = request.url.split('?')[0].rstrip('/')
+    if clean_url == "https://www.instagram.com":
+        raise HTTPException(status_code=400, detail="Please open a specific Video or Story first.")
+
     # Check Cookies
     cookie_file = "cookies.txt"
     use_cookies = os.path.exists(cookie_file)
-    
-    if use_cookies:
-        print("🍪 Cookies.txt FOUND! Using for authentication.")
-    else:
-        print("⚠️ No cookies.txt found. Instagram might block this.")
+    print(f"🍪 Cookies found: {use_cookies}")
 
     ydl_opts = {
         'outtmpl': f'{DOWNLOAD_DIR}/{unique_name}.%(ext)s',
-        'format': 'bestvideo+bestaudio/best',  # Force best video
+        'format': 'best',  # Allow best video OR image
         'quiet': True,
         'no_warnings': True,
-        'writethumbnail': True,  # We keep this, but ignore the file if video exists
+        'writethumbnail': True,
         'ignoreerrors': True,
+        'noplaylist': True,
     }
-    
+
     if use_cookies:
         ydl_opts['cookiefile'] = cookie_file
 
@@ -53,28 +55,26 @@ def extract_info(request: VideoRequest, req: Request):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             print(f"⏳ Downloading: {request.url}")
             info = ydl.extract_info(request.url, download=True)
-            
-            # --- INTELLIGENT FILE SEARCH ---
+
+            # --- FILE FINDER ---
             saved_filename = None
             files_in_dir = os.listdir(DOWNLOAD_DIR)
-            
-            # PRIORITY 1: Look for VIDEO files first
+
+            # Priority 1: Search for VIDEO
             for f in files_in_dir:
-                if f.startswith(unique_name) and f.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
+                if f.startswith(unique_name) and f.lower().endswith(('.mp4', '.mkv', '.mov')):
                     saved_filename = f
                     break
-            
-            # PRIORITY 2: If no video, look for IMAGE files (Fallback)
+
+            # Priority 2: Search for IMAGE (If no video found)
             if not saved_filename:
                 for f in files_in_dir:
-                    if f.startswith(unique_name) and f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    if f.startswith(unique_name) and f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                         saved_filename = f
                         break
-            
+
             if not saved_filename:
-                print(f"❌ Error: UUID {unique_name} not found.")
-                print(f"📂 Dir content: {files_in_dir}")
-                raise Exception("Download failed or file not found.")
+                raise Exception("Download failed. No media file found.")
 
             basename = saved_filename
             ext = os.path.splitext(saved_filename)[1].replace('.', '').lower()
@@ -87,7 +87,7 @@ def extract_info(request: VideoRequest, req: Request):
             host_url = str(req.base_url).rstrip('/')
             local_download_url = f"{host_url}/downloads/{basename}"
 
-            print(f"✅ Success! Served: {basename} ({media_type})")
+            print(f"✅ Served: {basename} ({media_type})")
 
             return {
                 "status": "success",
@@ -98,7 +98,7 @@ def extract_info(request: VideoRequest, req: Request):
             }
 
     except Exception as e:
-        print(f"🔥 Server Error: {str(e)}")
+        print(f"🔥 Error: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":

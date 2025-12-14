@@ -324,95 +324,100 @@ class WebViewScreen extends StatefulWidget {
 
 class _WebViewScreenState extends State<WebViewScreen> {
   late final WebViewController _controller;
-  String _currentUrl = "";
 
   @override
   void initState() {
     super.initState();
-    _currentUrl = widget.initialUrl;
-
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageStarted: (String url) => setState(() => _currentUrl = url),
-          onUrlChange: (change) {
-            setState(() => _currentUrl = change.url ?? _currentUrl);
-            debugPrint("🔗 URL Changed: $_currentUrl");
-          },
+          onPageStarted: (String url) => debugPrint("Loading: $url"),
         ),
       );
-
     _controller.loadRequest(Uri.parse(widget.initialUrl));
   }
 
-  Future<String?> _detectVideoLink() async {
-    // 1. If it's a Story, return immediately
-    if (_currentUrl.contains('/stories/')) {
-      return _currentUrl;
-    }
-
-    // 2. Try Smart Detection (JS)
+  Future<String?> _getRealLink() async {
+    // Advanced JS Script to extract the correct URL
     const String script = """
       (function() {
-        var videos = document.getElementsByTagName('video');
-        for (var i = 0; i < videos.length; i++) {
-          var rect = videos[i].getBoundingClientRect();
-          var screenCenter = window.innerHeight / 2;
-          var elementCenter = rect.top + rect.height / 2;
+        var currentUrl = window.location.href;
+        
+        // 1. STORY MODE: Always return current URL (it updates as you tap)
+        if (currentUrl.includes('/stories/')) {
+          return currentUrl;
+        }
+
+        // 2. DIRECT POST: Return immediately
+        if (currentUrl.includes('/p/') || currentUrl.includes('/reel/')) {
+           return currentUrl;
+        }
+
+        // 3. HOME FEED: Find the post in the middle of the screen
+        var screenCenter = window.innerHeight / 2;
+        var minDistance = 10000;
+        var bestLink = null;
+
+        // Find all links containing /p/ or /reel/
+        var links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+        
+        for (var i = 0; i < links.length; i++) {
+          var rect = links[i].getBoundingClientRect();
           
-          // Check if video is roughly in center
-          if (Math.abs(elementCenter - screenCenter) < 300) {
-            // Try to find parent link
-            var parent = videos[i].closest('a');
-            if (parent && parent.href) return parent.href;
+          // Must be visible on screen
+          if (rect.top > 0 && rect.bottom < window.innerHeight) {
+             var center = rect.top + rect.height / 2;
+             var dist = Math.abs(center - screenCenter);
+             
+             if (dist < minDistance) {
+               minDistance = dist;
+               bestLink = links[i].href;
+             }
           }
         }
-        return null;
+        
+        if (bestLink) return bestLink;
+        
+        // Fallback
+        return currentUrl;
       })();
     """;
 
     try {
       final result = await _controller.runJavaScriptReturningResult(script);
-      if (result != null && result.toString() != 'null' && result.toString() != '""') {
-        String jsLink = result.toString().replaceAll('"', '');
-        debugPrint("✅ JS Detected: $jsLink");
-        return jsLink;
+      if (result != null && result.toString() != 'null') {
+        return result.toString().replaceAll('"', '');
       }
     } catch (e) {
       debugPrint("JS Error: $e");
     }
-    
-    // 3. FALLBACK (الحل الاحتياطي): 
-    // If JS fails, just return the current page URL.
-    // Let the Backend handle the filtering.
-    debugPrint("⚠️ JS failed, using current URL: $_currentUrl");
-    return _currentUrl;
+    return null;
   }
 
   void _handleDownload() async {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text("🔍 Detecting media..."),
+        content: Text("🔍 Fetching link..."),
         duration: Duration(milliseconds: 500),
       ),
     );
 
-    String? targetUrl = await _detectVideoLink();
+    String? targetUrl = await _getRealLink();
 
-    if (targetUrl != null) {
-      debugPrint("✅ Target Found: $targetUrl");
-      if (mounted) {
-        DownloadManager.startDownload(context, targetUrl);
-      }
-    } else {
+    if (targetUrl == null || targetUrl == "https://www.instagram.com/") {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content:
-              Text("Couldn't find a video/story. Try opening the post directly."),
+          content: Text("⚠️ Please open a specific Video or Story first!"),
           backgroundColor: Colors.orange,
         ),
       );
+      return;
+    }
+
+    debugPrint("🎯 Downloading: $targetUrl");
+    if (mounted) {
+      DownloadManager.startDownload(context, targetUrl);
     }
   }
 
@@ -423,11 +428,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
       body: Stack(
         children: [
           WebViewWidget(controller: _controller),
-
-          // DRAGGABLE DOWNLOAD BUTTON
-          DraggableFloatingButton(
-            onPressed: _handleDownload,
-          ),
+          DraggableFloatingButton(onPressed: _handleDownload),
         ],
       ),
     );
