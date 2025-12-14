@@ -1,0 +1,54 @@
+# =========================
+# Backend (FastAPI / Python)
+# =========================
+
+# Downloaded media
+backend/downloads/
+
+# Python cache
+backend/__pycache__/
+backend/**/__pycache__/
+
+# Media files inside backend (videos/images)
+backend/**/*.mp4
+backend/**/*.mkv
+backend/**/*.avi
+backend/**/*.mov
+backend/**/*.webm
+backend/**/*.jpg
+backend/**/*.jpeg
+backend/**/*.png
+backend/**/*.webp
+backend/**/*.gif
+
+# Environment files
+backend/.env
+.env
+
+
+# =========================
+# Flutter Frontend
+# =========================
+
+# Build outputs
+frontend/build/
+
+# Dart / Flutter tooling
+frontend/.dart_tool/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+frontend/pubspec.lock
+
+# Gradle / Android build
+frontend/android/.gradle/
+frontend/android/app/build/
+
+
+# =========================
+# IDE / Editors
+# =========================
+
+.vscode/
+.idea/
+*.iml
