@@ -218,7 +218,9 @@ class _DownloaderTabState extends State<DownloaderTab> {
   Future<void> _pasteLink() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data?.text != null) {
-      setState(() { _urlController.text = data!.text!; });
+      setState(() {
+        _urlController.text = data!.text!;
+      });
     }
   }
 
@@ -241,7 +243,8 @@ class _DownloaderTabState extends State<DownloaderTab> {
               decoration: InputDecoration(
                 labelText: "Paste Video Link",
                 border: const OutlineInputBorder(),
-                suffixIcon: IconButton(icon: const Icon(Icons.paste), onPressed: _pasteLink),
+                suffixIcon:
+                    IconButton(icon: const Icon(Icons.paste), onPressed: _pasteLink),
               ),
             ),
             const SizedBox(height: 20),
@@ -249,7 +252,9 @@ class _DownloaderTabState extends State<DownloaderTab> {
               onPressed: _startDownload,
               icon: const Icon(Icons.download),
               label: const Text("Start Download"),
-              style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 50)),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 50),
+              ),
             ),
           ],
         ),
@@ -265,7 +270,9 @@ class SocialBrowserTab extends StatelessWidget {
   void _openBrowser(BuildContext context, String url, String title) {
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => WebViewScreen(initialUrl: url, title: title)),
+      MaterialPageRoute(
+        builder: (_) => WebViewScreen(initialUrl: url, title: title),
+      ),
     );
   }
 
@@ -305,7 +312,7 @@ class SocialBrowserTab extends StatelessWidget {
   }
 }
 
-// --- SMART WEBVIEW SCREEN ---
+// --- SMART WEBVIEW SCREEN (Draggable & Story Support) ---
 class WebViewScreen extends StatefulWidget {
   final String initialUrl;
   final String title;
@@ -329,44 +336,36 @@ class _WebViewScreenState extends State<WebViewScreen> {
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (String url) => setState(() => _currentUrl = url),
-          onUrlChange: (change) => setState(() => _currentUrl = change.url ?? _currentUrl),
+          onUrlChange: (change) {
+            setState(() => _currentUrl = change.url ?? _currentUrl);
+            debugPrint("🔗 URL Changed: $_currentUrl");
+          },
         ),
       );
 
     _controller.loadRequest(Uri.parse(widget.initialUrl));
   }
 
-  // This script tries to find the video link of the item currently in view
-  Future<String?> _extractVideoLinkFromFeed() async {
+  Future<String?> _detectVideoLink() async {
+    // 1. If it's a Story, return immediately
+    if (_currentUrl.contains('/stories/')) {
+      return _currentUrl;
+    }
+
+    // 2. Try Smart Detection (JS)
     const String script = """
       (function() {
         var videos = document.getElementsByTagName('video');
-        var centerVideo = null;
-        var minDistance = 100000;
-
-        // Find video closest to center of screen
-        for (var i = 0; i <videos.length; i++) {
+        for (var i = 0; i < videos.length; i++) {
           var rect = videos[i].getBoundingClientRect();
-          var centerY = rect.top + rect.height / 2;
           var screenCenter = window.innerHeight / 2;
-          var distance = Math.abs(centerY - screenCenter);
-
-          if (distance < minDistance && rect.height > 100) {
-            minDistance = distance;
-            centerVideo = videos[i];
-          }
-        }
-
-        if (centerVideo) {
-          // Traverse up to find the anchor tag <a> with the post link
-          var parent = centerVideo.parentElement;
-          var attempts = 0;
-          while (parent && attempts < 15) {
-            if (parent.tagName === 'A' && parent.href) {
-              return parent.href;
-            }
-            parent = parent.parentElement;
-            attempts++;
+          var elementCenter = rect.top + rect.height / 2;
+          
+          // Check if video is roughly in center
+          if (Math.abs(elementCenter - screenCenter) < 300) {
+            // Try to find parent link
+            var parent = videos[i].closest('a');
+            if (parent && parent.href) return parent.href;
           }
         }
         return null;
@@ -376,61 +375,95 @@ class _WebViewScreenState extends State<WebViewScreen> {
     try {
       final result = await _controller.runJavaScriptReturningResult(script);
       if (result != null && result.toString() != 'null' && result.toString() != '""') {
-        return result.toString().replaceAll('"', '');
+        String jsLink = result.toString().replaceAll('"', '');
+        debugPrint("✅ JS Detected: $jsLink");
+        return jsLink;
       }
     } catch (e) {
       debugPrint("JS Error: $e");
     }
-    return null;
+    
+    // 3. FALLBACK (الحل الاحتياطي): 
+    // If JS fails, just return the current page URL.
+    // Let the Backend handle the filtering.
+    debugPrint("⚠️ JS failed, using current URL: $_currentUrl");
+    return _currentUrl;
   }
 
   void _handleDownload() async {
-    String targetUrl = _currentUrl;
-
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text("🔍 Scanning for video..."),
-        duration: Duration(milliseconds: 800),
+        content: Text("🔍 Detecting media..."),
+        duration: Duration(milliseconds: 500),
       ),
     );
 
-    // 1. Try to extract specific video link from Feed via JS
-    String? extractedLink = await _extractVideoLinkFromFeed();
+    String? targetUrl = await _detectVideoLink();
 
-    if (extractedLink != null && extractedLink.startsWith('http')) {
-      debugPrint("✅ Smart Detector Found: $extractedLink");
-      targetUrl = extractedLink;
+    if (targetUrl != null) {
+      debugPrint("✅ Target Found: $targetUrl");
+      if (mounted) {
+        DownloadManager.startDownload(context, targetUrl);
+      }
     } else {
-      debugPrint("⚠️ No video detected in feed, using current URL: $_currentUrl");
-    }
-
-    // 2. Prevent downloading generic homepages if JS failed
-    if (targetUrl.endsWith('.com/') || targetUrl.endsWith('.com')) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("⚠️ Couldn't detect a video. Please tap on a specific video/post!"),
+          content:
+              Text("Couldn't find a video/story. Try opening the post directly."),
           backgroundColor: Colors.orange,
         ),
       );
-      return;
-    }
-
-    // 3. Start Download
-    if (mounted) {
-      DownloadManager.startDownload(context, targetUrl);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
-      body: WebViewWidget(controller: _controller),
-      floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: Colors.redAccent,
-        icon: const Icon(Icons.download_for_offline, color: Colors.white),
-        label: const Text("Smart Download", style: TextStyle(color: Colors.white)),
-        onPressed: _handleDownload,
+      appBar: AppBar(title: Text(widget.title), elevation: 0),
+      body: Stack(
+        children: [
+          WebViewWidget(controller: _controller),
+
+          // DRAGGABLE DOWNLOAD BUTTON
+          DraggableFloatingButton(
+            onPressed: _handleDownload,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// --- NEW WIDGET: DRAGGABLE BUTTON ---
+class DraggableFloatingButton extends StatefulWidget {
+  final VoidCallback onPressed;
+  const DraggableFloatingButton({super.key, required this.onPressed});
+
+  @override
+  State<DraggableFloatingButton> createState() => _DraggableFloatingButtonState();
+}
+
+class _DraggableFloatingButtonState extends State<DraggableFloatingButton> {
+  Offset position = const Offset(20, 100); // Initial position
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      left: position.dx,
+      top: position.dy,
+      child: GestureDetector(
+        onPanUpdate: (details) {
+          setState(() {
+            // Update position with drag
+            position += details.delta;
+          });
+        },
+        child: FloatingActionButton(
+          mini: true, // Smaller size
+          backgroundColor: Colors.redAccent.withOpacity(0.9),
+          onPressed: widget.onPressed,
+          child: const Icon(Icons.download, size: 20, color: Colors.white),
+        ),
       ),
     );
   }
@@ -460,7 +493,9 @@ class _GalleryTabState extends State<GalleryTab> {
     setState(() {
       _files = allFiles.where((file) {
         String path = file.path.toLowerCase();
-        return path.endsWith(".mp4") || path.endsWith(".jpg") || path.endsWith(".png");
+        return path.endsWith(".mp4") ||
+            path.endsWith(".jpg") ||
+            path.endsWith(".png");
       }).toList().reversed.toList();
       _loading = false;
     });
@@ -468,9 +503,15 @@ class _GalleryTabState extends State<GalleryTab> {
 
   void _openMedia(String path) {
     if (path.endsWith(".mp4")) {
-      Navigator.push(context, MaterialPageRoute(builder: (_) => VideoPlayerScreen(path: path)));
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => VideoPlayerScreen(path: path)),
+      );
     } else {
-      showDialog(context: context, builder: (_) => Dialog(child: Image.file(File(path))));
+      showDialog(
+        context: context,
+        builder: (_) => Dialog(child: Image.file(File(path))),
+      );
     }
   }
 
@@ -479,11 +520,13 @@ class _GalleryTabState extends State<GalleryTab> {
     return Scaffold(
       appBar: AppBar(
         title: const Text("My Gallery"),
-        actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: _loadFiles)],
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadFiles),
+        ],
       ),
-      body: _loading 
+      body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _files.isEmpty 
+          : _files.isEmpty
               ? const Center(child: Text("No downloads yet"))
               : ListView.builder(
                   itemCount: _files.length,
@@ -491,13 +534,18 @@ class _GalleryTabState extends State<GalleryTab> {
                     final file = _files[index];
                     final isVideo = file.path.endsWith(".mp4");
                     return Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
                       child: ListTile(
                         leading: Container(
-                          width: 80, height: 50, color: Colors.black12,
-                          child: isVideo 
-                            ? const Icon(Icons.movie) // Placeholder for simplicity
-                            : Image.file(File(file.path), fit: BoxFit.cover),
+                          width: 80,
+                          height: 50,
+                          color: Colors.black12,
+                          child: isVideo
+                              ? const Icon(Icons.movie)
+                              : Image.file(File(file.path), fit: BoxFit.cover),
                         ),
                         title: Text(file.path.split('/').last),
                         trailing: const Icon(Icons.play_circle_outline),
@@ -513,6 +561,7 @@ class _GalleryTabState extends State<GalleryTab> {
 class VideoPlayerScreen extends StatefulWidget {
   final String path;
   const VideoPlayerScreen({super.key, required this.path});
+
   @override
   State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
 }
@@ -529,7 +578,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       setState(() {
         _chewieController = ChewieController(
           videoPlayerController: _videoController,
-          autoPlay: true, looping: true,
+          autoPlay: true,
+          looping: true,
         );
       });
     });
