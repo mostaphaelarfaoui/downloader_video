@@ -286,8 +286,8 @@ class SocialBrowserTab extends StatelessWidget {
         mainAxisSpacing: 20,
         crossAxisSpacing: 20,
         children: [
-          _buildCard(context, "Instagram", "https://instagram.com", Colors.purple),
-          _buildCard(context, "TikTok", "https://tiktok.com", Colors.black),
+          _buildCard(context, "Instagram", "https://www.instagram.com/", Colors.purple),
+          _buildCard(context, "TikTok", "https://www.tiktok.com/", Colors.black),
           _buildCard(context, "Facebook", "https://facebook.com", Colors.blue),
         ],
       ),
@@ -312,7 +312,6 @@ class SocialBrowserTab extends StatelessWidget {
   }
 }
 
-// --- SMART WEBVIEW SCREEN (Draggable & Story Support) ---
 class WebViewScreen extends StatefulWidget {
   final String initialUrl;
   final String title;
@@ -332,61 +331,95 @@ class _WebViewScreenState extends State<WebViewScreen> {
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageStarted: (String url) => debugPrint("Loading: $url"),
+          onPageStarted: (String url) => debugPrint("Page Load: $url"),
+          // 🛑 STOP PLAY STORE REDIRECTS 🛑
+          onNavigationRequest: (NavigationRequest request) {
+            String url = request.url.toLowerCase();
+
+            // Block Play Store, Intents, and Market links
+            if (url.startsWith('intent://') ||
+                url.startsWith('market://') ||
+                url.contains('play.google.com') ||
+                url.contains('itunes.apple.com')) {
+              debugPrint("🚫 Blocked Redirect to: $url");
+              return NavigationDecision.prevent; // Prevent leaving the app
+            }
+
+            // Block any other non-http(s) deep-links (e.g. snssdk1233://)
+            if (!url.startsWith('http')) {
+              debugPrint("🚫 Blocked non-http(s) navigation: $url");
+              return NavigationDecision.prevent;
+            }
+
+            return NavigationDecision.navigate; // Allow normal browsing
+          },
         ),
       );
     _controller.loadRequest(Uri.parse(widget.initialUrl));
   }
 
   Future<String?> _getRealLink() async {
-    // Advanced JS Script to extract the correct URL
     const String script = """
       (function() {
         var currentUrl = window.location.href;
         
-        // 1. STORY MODE: Always return current URL (it updates as you tap)
-        if (currentUrl.includes('/stories/')) {
+        // 1. If URL already looks like a specific video/post/story -> Return it
+        if (currentUrl.includes('/video/') || currentUrl.includes('/p/') || currentUrl.includes('/reel/') || currentUrl.includes('/stories/')) {
           return currentUrl;
         }
 
-        // 2. DIRECT POST: Return immediately
-        if (currentUrl.includes('/p/') || currentUrl.includes('/reel/')) {
-           return currentUrl;
+        // 2. TIKTOK SPECIFIC FIX
+        if (currentUrl.includes('tiktok.com')) {
+          // Try to grab the actual playing video URL first
+          var video = document.querySelector('video');
+          if (video) {
+            if (video.currentSrc) return video.currentSrc;
+            if (video.src) return video.src;
+
+            var source = video.querySelector('source');
+            if (source && source.src) return source.src;
+          }
+
+          // Prefer a canonical video page link if available
+          var canonical = document.querySelector('link[rel="canonical"]');
+          if (canonical && canonical.href && canonical.href.includes('/video/')) {
+            return canonical.href;
+          }
+
+          // Fallback: closest /video/ anchor in the DOM
+          var aTag = document.querySelector('a[href*="/video/"]');
+          if (aTag && aTag.href) return aTag.href;
         }
 
-        // 3. HOME FEED: Find the post in the middle of the screen
+        // 3. GENERIC FEED SEARCH (Instagram/Facebook)
         var screenCenter = window.innerHeight / 2;
-        var minDistance = 10000;
         var bestLink = null;
+        var minDistance = 10000;
 
-        // Find all links containing /p/ or /reel/
-        var links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
-        
-        for (var i = 0; i < links.length; i++) {
+        var links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/video/"]');
+
+        for (var i = 0; i <links.length; i++) {
           var rect = links[i].getBoundingClientRect();
-          
-          // Must be visible on screen
           if (rect.top > 0 && rect.bottom < window.innerHeight) {
-             var center = rect.top + rect.height / 2;
-             var dist = Math.abs(center - screenCenter);
-             
-             if (dist < minDistance) {
-               minDistance = dist;
-               bestLink = links[i].href;
-             }
+            var center = rect.top + rect.height / 2;
+            var dist = Math.abs(center - screenCenter);
+            if (dist < minDistance) {
+              minDistance = dist;
+              bestLink = links[i].href;
+            }
           }
         }
-        
+
         if (bestLink) return bestLink;
-        
-        // Fallback
+
+        // Fallback: Return current URL (Let Backend handle it)
         return currentUrl;
       })();
     """;
 
     try {
       final result = await _controller.runJavaScriptReturningResult(script);
-      if (result != null && result.toString() != 'null') {
+      if (result != null && result.toString() != 'null' && result.toString() != '""') {
         return result.toString().replaceAll('"', '');
       }
     } catch (e) {
@@ -397,25 +430,26 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
   void _handleDownload() async {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("🔍 Fetching link..."),
-        duration: Duration(milliseconds: 500),
-      ),
+      const SnackBar(content: Text("🔍 Detecting video..."), duration: Duration(milliseconds: 500)),
     );
 
     String? targetUrl = await _getRealLink();
 
-    if (targetUrl == null || targetUrl == "https://www.instagram.com/") {
+    // Block Generic Home URLs
+    if (targetUrl == null ||
+        targetUrl.trim() == "https://www.tiktok.com/" ||
+        targetUrl.trim() == "https://www.instagram.com/" ||
+        !targetUrl.startsWith("http")) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("⚠️ Please open a specific Video or Story first!"),
+          content: Text("⚠️ Open the video fully or wait a moment!"),
           backgroundColor: Colors.orange,
         ),
       );
       return;
     }
 
-    debugPrint("🎯 Downloading: $targetUrl");
+    debugPrint("🎯 Sending to Backend: $targetUrl");
     if (mounted) {
       DownloadManager.startDownload(context, targetUrl);
     }

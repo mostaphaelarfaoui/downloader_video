@@ -1,5 +1,6 @@
 import os
 import uuid
+import time
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -24,14 +25,43 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
+# --- دالة التنظيف (The Cleaner) ---
+# هذه الدالة تمسح الملفات القديمة (أكثر من 10 دقائق) لتوفير المساحة في Render
+def cleanup_old_files():
+    """Delete files older than 10 minutes to save space on Render"""
+    current_time = time.time()
+    # 10 minutes = 600 seconds
+    max_age = 600 
+    
+    try:
+        if not os.path.exists(DOWNLOAD_DIR):
+            return
+
+        files = os.listdir(DOWNLOAD_DIR)
+        for f in files:
+            file_path = os.path.join(DOWNLOAD_DIR, f)
+            # Check file age
+            if os.path.exists(file_path):
+                file_age = current_time - os.path.getmtime(file_path)
+                if file_age > max_age:
+                    try:
+                        os.remove(file_path)
+                        print(f"🧹 Cleaned up old file: {f}")
+                    except Exception as e:
+                        print(f"⚠️ Error deleting {f}: {e}")
+    except Exception as e:
+        print(f"⚠️ Cleanup error: {e}")
+
 @app.post("/extract")
 def extract_info(request: VideoRequest, req: Request):
+    # 1. Start Cleanup BEFORE downloading new file
+    cleanup_old_files()
+
     unique_name = str(uuid.uuid4())
 
-    # 1. Block Generic Home URLs
-    clean_url = request.url.split('?')[0].rstrip('/')
-    if clean_url == "https://www.instagram.com":
-        raise HTTPException(status_code=400, detail="Please open a specific Video or Story first.")
+    # 2. Block Generic Home URLs
+    if "instagram.com" in request.url and len(request.url.split('/')) < 4:
+        raise HTTPException(status_code=400, detail="Generic URL. Please open a specific post first.")
 
     # Check Cookies
     cookie_file = "cookies.txt"
@@ -40,11 +70,10 @@ def extract_info(request: VideoRequest, req: Request):
 
     ydl_opts = {
         'outtmpl': f'{DOWNLOAD_DIR}/{unique_name}.%(ext)s',
-        'format': 'best',  # Allow best video OR image
+        'format': 'best',
         'quiet': True,
-        'no_warnings': True,
-        'writethumbnail': True,
         'ignoreerrors': True,
+        'writethumbnail': True,
         'noplaylist': True,
     }
 
@@ -54,34 +83,39 @@ def extract_info(request: VideoRequest, req: Request):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             print(f"⏳ Downloading: {request.url}")
-            info = ydl.extract_info(request.url, download=True)
+            try:
+                ydl.extract_info(request.url, download=True)
+            except Exception as e:
+                # CRITICAL: Do not crash for photo posts (e.g. "No video formats found")
+                print(f"⚠️ yt-dlp warning (ignored): {str(e)}")
 
             # --- FILE FINDER ---
             saved_filename = None
             files_in_dir = os.listdir(DOWNLOAD_DIR)
 
-            # Priority 1: Search for VIDEO
+            # Pass 1: Look for VIDEO
             for f in files_in_dir:
                 if f.startswith(unique_name) and f.lower().endswith(('.mp4', '.mkv', '.mov')):
                     saved_filename = f
                     break
 
-            # Priority 2: Search for IMAGE (If no video found)
+            # Pass 2: Look for IMAGE (Fallback)
             if not saved_filename:
                 for f in files_in_dir:
-                    if f.startswith(unique_name) and f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                    if f.startswith(unique_name) and f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.heic')):
                         saved_filename = f
                         break
 
             if not saved_filename:
-                raise Exception("Download failed. No media file found.")
+                print(f"❌ Error: No file found for UUID {unique_name}")
+                print(f"📂 Dir content: {files_in_dir}")
+                raise Exception("Download failed. No media file found (Video or Image).")
 
             basename = saved_filename
             ext = os.path.splitext(saved_filename)[1].replace('.', '').lower()
-            title = info.get('title', 'media') if info else 'media'
 
             media_type = "video"
-            if ext in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
+            if ext in ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic']:
                 media_type = "image"
 
             host_url = str(req.base_url).rstrip('/')
@@ -91,7 +125,7 @@ def extract_info(request: VideoRequest, req: Request):
 
             return {
                 "status": "success",
-                "title": title,
+                "title": "Media Download",
                 "download_url": local_download_url,
                 "ext": ext,
                 "media_type": media_type,
@@ -103,4 +137,5 @@ def extract_info(request: VideoRequest, req: Request):
 
 if __name__ == "__main__":
     import uvicorn
+    # Important: Use port 8000 locally, but Render will override it via env var
     uvicorn.run(app, host="0.0.0.0", port=8000)
