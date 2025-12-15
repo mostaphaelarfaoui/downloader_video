@@ -14,7 +14,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 // --- CONFIGURATION ---
 // CHECK YOUR IP
-final String backendUrl = "http://192.168.11.130:8000/extract";
+final String backendUrl = "https://downloader-video-thk0.onrender.com/extract";
 
 // --- NOTIFICATIONS SETUP ---
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
@@ -79,13 +79,20 @@ class MyApp extends StatelessWidget {
 
 // --- SHARED DOWNLOAD MANAGER ---
 class DownloadManager {
-  static Future<void> startDownload(BuildContext context, String url) async {
+  static Future<void> startDownload(
+    BuildContext context,
+    String url, {
+    void Function(String status)? onStatusChange,
+    void Function(int progress)? onProgress,
+  }) async {
     if (url.isEmpty) return;
     
     // Show immediate feedback
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("⏳ Analyzing link... Please wait.")),
+      const SnackBar(content: Text("\u23f3 Analyzing link... Please wait.")),
     );
+
+    onStatusChange?.call("Preparing...");
 
     // Generate a unique ID for notifications
     int notificationId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -98,6 +105,7 @@ class DownloadManager {
       );
 
       // 1. Backend Request
+      onStatusChange?.call("Contacting server...");
       final response = await Dio(options).post(
         backendUrl, 
         data: {"url": url},
@@ -115,8 +123,10 @@ class DownloadManager {
 
         // Notify start
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("⬇️ Downloading $mediaType in background...")),
+          SnackBar(content: Text("\u2b07\ufe0f Downloading $mediaType in background...")),
         );
+
+        onStatusChange?.call("Downloading $mediaType...");
 
         // 2. Download File
         await Dio(options).download(downloadUrl, savePath, 
@@ -124,6 +134,7 @@ class DownloadManager {
             if (total != -1) {
               int percent = ((received / total) * 100).toInt();
               if (percent % 10 == 0) _showProgressNotification(notificationId, percent);
+              onProgress?.call(percent);
             }
           }
         );
@@ -138,8 +149,11 @@ class DownloadManager {
         _showCompletionNotification(notificationId, fileName);
         
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("✅ Download Complete! Saved to Gallery.")),
+          const SnackBar(content: Text("\u2705 Download Complete! Saved to Gallery.")),
         );
+
+        onProgress?.call(100);
+        onStatusChange?.call("Completed");
       }
     } catch (e) {
       String errorMessage = "Download Failed";
@@ -165,6 +179,8 @@ class DownloadManager {
           behavior: SnackBarBehavior.floating,
         ),
       );
+
+      onStatusChange?.call(errorMessage);
     }
   }
 }
@@ -214,6 +230,9 @@ class DownloaderTab extends StatefulWidget {
 
 class _DownloaderTabState extends State<DownloaderTab> {
   final TextEditingController _urlController = TextEditingController();
+  double _downloadProgress = 0.0;
+  String _downloadStatus = "";
+  bool _isDownloading = false;
 
   Future<void> _pasteLink() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -224,9 +243,35 @@ class _DownloaderTabState extends State<DownloaderTab> {
     }
   }
 
-  void _startDownload() {
+  void _startDownload() async {
     FocusScope.of(context).unfocus();
-    DownloadManager.startDownload(context, _urlController.text);
+    setState(() {
+      _isDownloading = true;
+      _downloadProgress = 0.0;
+      _downloadStatus = "Preparing...";
+    });
+
+    await DownloadManager.startDownload(
+      context,
+      _urlController.text,
+      onStatusChange: (status) {
+        if (!mounted) return;
+        setState(() {
+          _downloadStatus = status;
+        });
+      },
+      onProgress: (percent) {
+        if (!mounted) return;
+        setState(() {
+          _downloadProgress = percent / 100.0;
+        });
+      },
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _isDownloading = false;
+    });
   }
 
   @override
@@ -243,8 +288,21 @@ class _DownloaderTabState extends State<DownloaderTab> {
               decoration: InputDecoration(
                 labelText: "Paste Video Link",
                 border: const OutlineInputBorder(),
-                suffixIcon:
-                    IconButton(icon: const Icon(Icons.paste), onPressed: _pasteLink),
+                suffixIcon: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _urlController.clear();
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.paste),
+                      onPressed: _pasteLink,
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 20),
@@ -256,6 +314,17 @@ class _DownloaderTabState extends State<DownloaderTab> {
                 minimumSize: const Size(double.infinity, 50),
               ),
             ),
+            if (_isDownloading || _downloadProgress > 0) ...[
+              const SizedBox(height: 20),
+              LinearProgressIndicator(
+                value: _downloadProgress == 0.0 ? null : _downloadProgress,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _downloadStatus,
+                textAlign: TextAlign.center,
+              ),
+            ],
           ],
         ),
       ),
