@@ -16,6 +16,67 @@ import 'package:webview_flutter/webview_flutter.dart';
 // CHECK YOUR IP
 final String backendUrl = "https://downloader-video-thk0.onrender.com/extract";
 
+// --- STORAGE CONFIG ---
+// Folder name that will be created on the phone for this app
+const String appFolderName = "My Downloader";
+const String _videoCounterFileName = ".video_counter";
+
+Future<Directory> _getAppStorageDir() async {
+  final fallback = await getApplicationDocumentsDirectory();
+
+  // User requirement: store inside the phone's main Downloads folder.
+  // On Android, the common path is /storage/emulated/0/Download
+  // (Some devices use /storage/emulated/0/Downloads)
+  Directory root;
+  if (Platform.isAndroid) {
+    final download1 = Directory('/storage/emulated/0/Download');
+    final download2 = Directory('/storage/emulated/0/Downloads');
+    if (await download1.exists()) {
+      root = download1;
+    } else if (await download2.exists()) {
+      root = download2;
+    } else {
+      final external = await getExternalStorageDirectory();
+      root = external ?? fallback;
+    }
+  } else {
+    root = fallback;
+  }
+
+  final dir = Directory('${root.path}/$appFolderName');
+  if (!await dir.exists()) {
+    await dir.create(recursive: true);
+  }
+  return dir;
+}
+
+Future<int> _getAndReserveNextVideoNumber() async {
+  final dir = await _getAppStorageDir();
+  final counterFile = File('${dir.path}/$_videoCounterFileName');
+
+  int current = 1;
+  try {
+    if (await counterFile.exists()) {
+      final content = await counterFile.readAsString();
+      final parsed = int.tryParse(content.trim());
+      if (parsed != null && parsed > 0) {
+        current = parsed;
+      }
+    }
+  } catch (_) {
+    // Ignore read errors
+  }
+
+  // Reserve current number by incrementing immediately and persisting.
+  try {
+    await counterFile.writeAsString('${current + 1}');
+  } catch (_) {
+    // Ignore write errors (fallback: could repeat next run)
+  }
+
+  return current;
+}
+
 // --- NOTIFICATIONS SETUP ---
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
@@ -60,6 +121,8 @@ Future<void> _showCompletionNotification(int id, String title) async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await _initNotifications();
+  // Create the storage folder on first run (after install)
+  await _getAppStorageDir();
   runApp(const ProviderScope(child: MyApp()));
 }
 
@@ -116,9 +179,16 @@ class DownloadManager {
         String downloadUrl = data['download_url'];
         String ext = data['ext'];
         String mediaType = data['media_type'] ?? "video"; 
-        
-        String fileName = "revert_${DateTime.now().millisecondsSinceEpoch}.$ext";
-        final appDir = await getApplicationDocumentsDirectory(); 
+
+        final appDir = await _getAppStorageDir();
+        String fileName;
+        if (mediaType == "video") {
+          final n = await _getAndReserveNextVideoNumber();
+          fileName = "Video $n.$ext";
+        } else {
+          fileName = "Image_${DateTime.now().millisecondsSinceEpoch}.$ext";
+        }
+
         final savePath = "${appDir.path}/$fileName";
 
         // Notify start
@@ -139,17 +209,10 @@ class DownloadManager {
           }
         );
 
-        // 3. Save to Gallery
-        if (mediaType == "image") {
-          await Gal.putImage(savePath);
-        } else {
-          await Gal.putVideo(savePath);
-        }
-
         _showCompletionNotification(notificationId, fileName);
         
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("\u2705 Download Complete! Saved to Gallery.")),
+          const SnackBar(content: Text("\u2705 Download Complete! Saved in My Downloader folder.")),
         );
 
         onProgress?.call(100);
@@ -592,7 +655,7 @@ class _GalleryTabState extends State<GalleryTab> {
   }
 
   Future<void> _loadFiles() async {
-    final appDir = await getApplicationDocumentsDirectory();
+    final appDir = await _getAppStorageDir();
     final allFiles = appDir.listSync();
     setState(() {
       _files = allFiles.where((file) {
@@ -603,6 +666,91 @@ class _GalleryTabState extends State<GalleryTab> {
       }).toList().reversed.toList();
       _loading = false;
     });
+  }
+
+  Future<bool> _confirmAction({
+    required String title,
+    required String message,
+    String confirmText = "Delete",
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(confirmText),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  Future<void> _deleteOne(FileSystemEntity entity) async {
+    final path = entity.path;
+    final name = path.split(Platform.pathSeparator).last;
+
+    final ok = await _confirmAction(
+      title: "Delete video?",
+      message: "Are you sure you want to delete:\n$name",
+    );
+    if (!ok) return;
+
+    try {
+      await File(path).delete();
+      if (!mounted) return;
+      await _loadFiles();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Deleted")),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Delete failed: $e")),
+      );
+    }
+  }
+
+  Future<void> _deleteAllVideos() async {
+    final videos = _files.where((f) => f.path.toLowerCase().endsWith('.mp4')).toList();
+    if (videos.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("No videos to delete")),
+      );
+      return;
+    }
+
+    final ok = await _confirmAction(
+      title: "Delete all videos?",
+      message: "This will permanently delete ${videos.length} video(s) from the app storage.",
+      confirmText: "Delete all",
+    );
+    if (!ok) return;
+
+    int deleted = 0;
+    for (final v in videos) {
+      try {
+        await File(v.path).delete();
+        deleted++;
+      } catch (_) {
+        // Ignore single-file failures
+      }
+    }
+
+    if (!mounted) return;
+    await _loadFiles();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text("Deleted $deleted video(s)")),
+    );
   }
 
   void _openMedia(String path) {
@@ -625,6 +773,11 @@ class _GalleryTabState extends State<GalleryTab> {
       appBar: AppBar(
         title: const Text("My Gallery"),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.delete_sweep),
+            onPressed: _deleteAllVideos,
+            tooltip: "Delete all videos",
+          ),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _loadFiles),
         ],
       ),
@@ -652,7 +805,18 @@ class _GalleryTabState extends State<GalleryTab> {
                               : Image.file(File(file.path), fit: BoxFit.cover),
                         ),
                         title: Text(file.path.split('/').last),
-                        trailing: const Icon(Icons.play_circle_outline),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (isVideo)
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline),
+                                onPressed: () => _deleteOne(file),
+                                tooltip: "Delete",
+                              ),
+                            const Icon(Icons.play_circle_outline),
+                          ],
+                        ),
                         onTap: () => _openMedia(file.path),
                       ),
                     );
