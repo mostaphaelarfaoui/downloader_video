@@ -1,15 +1,15 @@
 import 'dart:io';
-import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:gal/gal.dart';
 import 'package:video_player/video_player.dart';
+
 import 'package:chewie/chewie.dart';
-import 'package:video_thumbnail/video_thumbnail.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
 import 'package:webview_flutter/webview_flutter.dart';
 
 // --- CONFIGURATION ---
@@ -147,6 +147,7 @@ class DownloadManager {
     String url, {
     void Function(String status)? onStatusChange,
     void Function(int progress)? onProgress,
+    CancelToken? cancelToken,
   }) async {
     if (url.isEmpty) return;
     
@@ -175,56 +176,80 @@ class DownloadManager {
       );
       
       final data = response.data;
-      if (data['status'] == 'success') {
-        String downloadUrl = data['download_url'];
-        String ext = data['ext'];
-        String mediaType = data['media_type'] ?? "video"; 
-
-        final appDir = await _getAppStorageDir();
-        String fileName;
-        if (mediaType == "video") {
-          final n = await _getAndReserveNextVideoNumber();
-          fileName = "Video $n.$ext";
-        } else {
-          fileName = "Image_${DateTime.now().millisecondsSinceEpoch}.$ext";
-        }
-
-        final savePath = "${appDir.path}/$fileName";
-
-        // Notify start
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("\u2b07\ufe0f Downloading $mediaType in background...")),
-        );
-
-        onStatusChange?.call("Downloading $mediaType...");
-
-        // 2. Download File
-        await Dio(options).download(downloadUrl, savePath, 
-          onReceiveProgress: (received, total) {
-            if (total != -1) {
-              int percent = ((received / total) * 100).toInt();
-              if (percent % 10 == 0) _showProgressNotification(notificationId, percent);
-              onProgress?.call(percent);
-            }
-          }
-        );
-
-        _showCompletionNotification(notificationId, fileName);
-        
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("\u2705 Download Complete! Saved in My Downloader folder.")),
-        );
-
-        onProgress?.call(100);
-        onStatusChange?.call("Completed");
+      if (data is! Map) {
+        throw Exception('Unexpected server response');
       }
+
+      if (data['status'] != 'success') {
+        final serverMessage = data['message']?.toString();
+        throw Exception(serverMessage == null || serverMessage.isEmpty
+            ? 'Server could not extract this media.'
+            : serverMessage);
+      }
+
+      final downloadUrl = data['download_url']?.toString();
+      final ext = data['ext']?.toString();
+      final mediaType = data['media_type']?.toString() ?? "video";
+
+      if (downloadUrl == null || ext == null || downloadUrl.isEmpty || ext.isEmpty) {
+        throw Exception('Server returned invalid download information.');
+      }
+
+      final appDir = await _getAppStorageDir();
+      String fileName;
+      if (mediaType == "video") {
+        final n = await _getAndReserveNextVideoNumber();
+        fileName = "Video $n.$ext";
+      } else {
+        fileName = "Image_${DateTime.now().millisecondsSinceEpoch}.$ext";
+      }
+
+      final savePath = "${appDir.path}/$fileName";
+
+      // Notify start
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("\u2b07\ufe0f Downloading $mediaType in background...")),
+      );
+
+      onStatusChange?.call("Downloading $mediaType...");
+
+      // 2. Download File
+      await Dio(options).download(
+        downloadUrl,
+        savePath,
+        cancelToken: cancelToken,
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            int percent = ((received / total) * 100).toInt();
+            if (percent % 10 == 0) _showProgressNotification(notificationId, percent);
+            onProgress?.call(percent);
+          }
+        },
+      );
+
+      _showCompletionNotification(notificationId, fileName);
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("\u2705 Download Complete! Saved in My Downloader folder.")),
+      );
+
+      onProgress?.call(100);
+      onStatusChange?.call("Completed");
     } catch (e) {
       String errorMessage = "Download Failed";
       
       if (e is DioException) {
-        if (e.response?.statusCode == 400) {
-          // This usually means the backend failed (e.g. Login required)
-          errorMessage = "Server Error: Video locked or Login required.";
+        if (e.type == DioExceptionType.cancel) {
+          errorMessage = "Download cancelled";
+        } else if (e.response?.statusCode == 400) {
+          // Prefer the backend's detailed message if available
+          final data = e.response?.data;
+          if (data is Map && data['detail'] != null) {
+            errorMessage = data['detail'].toString();
+          } else {
+            // Fallback generic message
+            errorMessage = "Server Error: Video locked or Login required.";
+          }
         } else if (e.type == DioExceptionType.connectionTimeout) {
           errorMessage = "Connection Timeout. Check Server.";
         } else {
@@ -234,11 +259,18 @@ class DownloadManager {
         errorMessage = e.toString();
       }
 
-      // Show a shorter, cleaner error message
+      // Special case: Instagram image posts not supported by backend/yt-dlp
+      if (errorMessage.contains('No media file found (Video or Image)')) {
+        errorMessage =
+            'Instagram: هذا المنشور غير مدعوم حالياً (خصوصاً بعض الصور). جرّب Reel أو فيديو آخر.';
+      }
+
+      // Show a shorter, cleaner error message (different color if cancelled)
+      final isCancelled = errorMessage == "Download cancelled";
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(errorMessage, maxLines: 2, overflow: TextOverflow.ellipsis),
-          backgroundColor: Colors.redAccent,
+          backgroundColor: isCancelled ? Colors.orange : Colors.redAccent,
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -296,6 +328,7 @@ class _DownloaderTabState extends State<DownloaderTab> {
   double _downloadProgress = 0.0;
   String _downloadStatus = "";
   bool _isDownloading = false;
+  CancelToken? _cancelToken;
 
   Future<void> _pasteLink() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -312,11 +345,13 @@ class _DownloaderTabState extends State<DownloaderTab> {
       _isDownloading = true;
       _downloadProgress = 0.0;
       _downloadStatus = "Preparing...";
+      _cancelToken = CancelToken();
     });
 
     await DownloadManager.startDownload(
       context,
       _urlController.text,
+
       onStatusChange: (status) {
         if (!mounted) return;
         setState(() {
@@ -329,11 +364,23 @@ class _DownloaderTabState extends State<DownloaderTab> {
           _downloadProgress = percent / 100.0;
         });
       },
+      cancelToken: _cancelToken,
     );
 
     if (!mounted) return;
     setState(() {
       _isDownloading = false;
+      _cancelToken = null;
+    });
+  }
+
+  void _cancelDownload() {
+    if (_cancelToken != null && !_cancelToken!.isCancelled) {
+      _cancelToken!.cancel("Cancelled by user");
+    }
+    setState(() {
+      _isDownloading = false;
+      _downloadStatus = "Cancelled";
     });
   }
 
@@ -369,14 +416,33 @@ class _DownloaderTabState extends State<DownloaderTab> {
               ),
             ),
             const SizedBox(height: 20),
-            ElevatedButton.icon(
-              onPressed: _startDownload,
-              icon: const Icon(Icons.download),
-              label: const Text("Start Download"),
-              style: ElevatedButton.styleFrom(
-                minimumSize: const Size(double.infinity, 50),
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isDownloading ? null : _startDownload,
+                    icon: const Icon(Icons.download),
+                    label: const Text("Start Download"),
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 50),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isDownloading ? _cancelDownload : null,
+                    icon: const Icon(Icons.cancel),
+                    label: const Text("Cancel"),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent,
+                      minimumSize: const Size(double.infinity, 50),
+                    ),
+                  ),
+                ),
+              ],
             ),
+
             if (_isDownloading || _downloadProgress > 0) ...[
               const SizedBox(height: 20),
               LinearProgressIndicator(
@@ -468,6 +534,12 @@ class _WebViewScreenState extends State<WebViewScreen> {
           onNavigationRequest: (NavigationRequest request) {
             String url = request.url.toLowerCase();
 
+            // Block TikTok deep-links/OneLink pages that try to force-open the app
+            if (url.contains('onelink.me') || url.contains('snssdk')) {
+              debugPrint("🚫 Blocked TikTok deep-link landing: $url");
+              return NavigationDecision.prevent;
+            }
+
             // Block Play Store, Intents, and Market links
             if (url.startsWith('intent://') ||
                 url.startsWith('market://') ||
@@ -530,7 +602,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
         var links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/video/"]');
 
-        for (var i = 0; i <links.length; i++) {
+        for (var i = 0; i < links.length; i++) {
           var rect = links[i].getBoundingClientRect();
           if (rect.top > 0 && rect.bottom < window.innerHeight) {
             var center = rect.top + rect.height / 2;
@@ -567,11 +639,32 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
     String? targetUrl = await _getRealLink();
 
+    // Normalize and discard non-http URLs (e.g. blob: from TikTok video element)
+    if (targetUrl != null) {
+      final normalized = targetUrl.trim();
+      if (!normalized.toLowerCase().startsWith('http')) {
+        targetUrl = null;
+      } else {
+        targetUrl = normalized;
+      }
+    }
+
+    // Fallback: if JS couldn't detect a proper media URL, use current WebView URL
+    if (targetUrl == null || targetUrl.isEmpty) {
+      try {
+        final current = await _controller.currentUrl();
+        if (current != null && current.toLowerCase().startsWith('http')) {
+          targetUrl = current.trim();
+        }
+      } catch (_) {
+        // ignore and let the generic warning handle it
+      }
+    }
+
     // Block Generic Home URLs
     if (targetUrl == null ||
         targetUrl.trim() == "https://www.tiktok.com/" ||
-        targetUrl.trim() == "https://www.instagram.com/" ||
-        !targetUrl.startsWith("http")) {
+        targetUrl.trim() == "https://www.instagram.com/") {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text("⚠️ Open the video fully or wait a moment!"),
@@ -615,14 +708,27 @@ class _DraggableFloatingButtonState extends State<DraggableFloatingButton> {
 
   @override
   Widget build(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+    const double buttonSize = 56; // default FAB size (approx)
+    final double maxX = screenSize.width - buttonSize;
+    final double maxY = screenSize.height - buttonSize - 80; // leave some bottom margin
+
+    // Clamp position in case screen size changed
+    position = Offset(
+      position.dx.clamp(0.0, maxX) as double,
+      position.dy.clamp(0.0, maxY) as double,
+    );
+
     return Positioned(
       left: position.dx,
       top: position.dy,
       child: GestureDetector(
         onPanUpdate: (details) {
           setState(() {
-            // Update position with drag
-            position += details.delta;
+            // Update position with drag and keep inside screen bounds
+            final double newX = (position.dx + details.delta.dx).clamp(0.0, maxX) as double;
+            final double newY = (position.dy + details.delta.dy).clamp(0.0, maxY) as double;
+            position = Offset(newX, newY);
           });
         },
         child: FloatingActionButton(
@@ -656,10 +762,11 @@ class _GalleryTabState extends State<GalleryTab> {
 
   Future<void> _loadFiles() async {
     final appDir = await _getAppStorageDir();
-    final allFiles = appDir.listSync();
+    final allFiles = await appDir.list().toList();
     setState(() {
       _files = allFiles.where((file) {
         String path = file.path.toLowerCase();
+
         return path.endsWith(".mp4") ||
             path.endsWith(".jpg") ||
             path.endsWith(".png");
@@ -804,7 +911,7 @@ class _GalleryTabState extends State<GalleryTab> {
                               ? const Icon(Icons.movie)
                               : Image.file(File(file.path), fit: BoxFit.cover),
                         ),
-                        title: Text(file.path.split('/').last),
+                        title: Text(file.path.split(Platform.pathSeparator).last),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
