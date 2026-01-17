@@ -1,12 +1,11 @@
 import os
 import uuid
 import time
-import re  # مكتبة للتعامل مع النصوص
+import requests # ضروري باش نحملو الصور يدوياً
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import yt_dlp
-import instaloader  # المكتبة الجديدة لانستغرام
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -24,44 +23,6 @@ app.add_middleware(
 
 class VideoRequest(BaseModel):
     url: str
-
-# --- إعداد Instaloader ---
-L = instaloader.Instaloader()
-
-# --- دالة مساعدة لانستغرام ---
-def get_instagram_direct_link(url: str):
-    try:
-        # استخراج الكود القصير (Shortcode) من الرابط
-        shortcode_match = re.search(r'/(p|reel|tv)/([^/?#&]+)', url)
-        if not shortcode_match:
-            return None 
-
-        shortcode = shortcode_match.group(2)
-        
-        # جلب معلومات البوست
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
-        
-        caption = post.caption if post.caption else "Instagram Media"
-        # تقليص العنوان إذا كان طويلاً
-        title = (caption[:50] + '..') if len(caption) > 50 else caption
-
-        if post.is_video:
-            return {
-                "direct_url": post.video_url,
-                "title": title,
-                "is_video": True,
-                "ext": "mp4"
-            }
-        else:
-            return {
-                "direct_url": post.url, # هذا رابط الصورة المباشر
-                "title": title,
-                "is_video": False,
-                "ext": "jpg"
-            }
-    except Exception as e:
-        print(f"⚠️ Instaloader error: {e}")
-        return None
 
 # --- دوال التنظيف ---
 def delete_file(path: str):
@@ -91,6 +52,29 @@ def cleanup_stale_files():
     except Exception:
         pass
 
+# --- دالة مساعدة لتحميل الصور يدوياً ---
+def download_image_manual(url, filename, cookie_file=None):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    # إلا كان عندنا كوكيز، نستعملوهم باش ما نتبلوكاوش
+    cookies = {}
+    if cookie_file and os.path.exists(cookie_file):
+        # قراءة بسيطة للكوكيز (Netscape format is complex, but basic requests might work without full parsing if URL is CDN)
+        # غالباً روابط الصور فـ انستغرام (CDN) كتكون عامة بمجرد استخراجها، يعني ما كتحتاجش كوكيز للتحميل، غير للاستخراج
+        pass 
+        
+    try:
+        response = requests.get(url, headers=headers, stream=True)
+        if response.status_code == 200:
+            with open(filename, 'wb') as f:
+                for chunk in response.iter_content(1024):
+                    f.write(chunk)
+            return True
+    except Exception as e:
+        print(f"⚠️ Image download failed: {e}")
+    return False
+
 # --- الروابط (Endpoints) ---
 
 @app.get("/get_file/{filename}")
@@ -105,86 +89,86 @@ async def get_file(filename: str, background_tasks: BackgroundTasks):
 def extract_info(request: VideoRequest, req: Request):
     cleanup_stale_files()
     url = request.url.strip()
-
-    # ==========================================
-    # 1. محاولة خاصة بـ Instagram (للصور والفيديو)
-    # ==========================================
-    if "instagram.com" in url:
-        print("📸 Detected Instagram URL, checking type...")
-        insta_data = get_instagram_direct_link(url)
-        
-        # إذا نجحنا في جلب الرابط المباشر من انستغرام
-        if insta_data:
-            print("✅ Instaloader success!")
-            return {
-                "status": "success",
-                "title": insta_data["title"],
-                "download_url": insta_data["direct_url"], # رابط CDN مباشر
-                "ext": insta_data["ext"],
-                "media_type": "video" if insta_data["is_video"] else "image",
-            }
-        else:
-            print("⚠️ Instaloader failed, falling back to yt-dlp...")
-    
-    # ==========================================
-    # 2. الطريقة العادية (yt-dlp) لباقي المواقع
-    # ==========================================
-    
     unique_name = str(uuid.uuid4())
-    
-    # Check Cookies
+
+    # إعداد الكوكيز
     cookie_file = "cookies.txt"
     use_cookies = os.path.exists(cookie_file)
 
     ydl_opts = {
         'outtmpl': f'{DOWNLOAD_DIR}/{unique_name}.%(ext)s',
-        'format': 'best',
         'quiet': True,
         'ignoreerrors': True,
-        'writethumbnail': True,
         'noplaylist': True,
+        'cookiefile': cookie_file if use_cookies else None,
     }
 
-    if use_cookies:
-        ydl_opts['cookiefile'] = cookie_file
-
     try:
+        print(f"⏳ Analyzing URL: {url}")
+        
+        # 1. نستخرجو المعلومات بلا تحميل (Simulation)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print(f"⏳ Downloading with yt-dlp: {url}")
-            ydl.extract_info(url, download=True)
+            info = ydl.extract_info(url, download=False)
+            
+            if not info:
+                raise Exception("Failed to extract info")
 
-            # البحث عن الملف المحمل
-            saved_filename = None
-            files_in_dir_local = os.listdir(DOWNLOAD_DIR)
+            # التحقق واش "ألبوم" صور (Sidecar)
+            if 'entries' in info:
+                # ناخدو غير أول وحدة فحالياً
+                info = info['entries'][0]
+
+            # 2. تحديد النوع: واش فيديو ولا تصويرة؟
+            # yt-dlp كيعطي 'vcodec': 'none' للصور
+            is_video = True
+            if info.get('vcodec') == 'none' or info.get('ext') in ['jpg', 'jpeg', 'png', 'webp']:
+                is_video = False
             
-            # بحث عن فيديو أولاً
-            for f_local in files_in_dir_local:
-                if f_local.startswith(unique_name) and f_local.lower().endswith((".mp4", ".mkv", ".mov")):
-                    saved_filename = f_local
-                    break
-            
-            # بحث عن صورة (احتياط)
-            if not saved_filename:
-                for f_local in files_in_dir_local:
-                    if f_local.startswith(unique_name) and f_local.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                        saved_filename = f_local
+            # --- 🅰️ حالة الفيديو ---
+            if is_video:
+                print("🎥 Type: Video - Using yt-dlp to download")
+                ydl.download([url])
+                
+                # البحث عن الفيديو المحمل
+                saved_filename = None
+                for f in os.listdir(DOWNLOAD_DIR):
+                    if f.startswith(unique_name) and f.lower().endswith((".mp4", ".mkv", ".mov", ".webm")):
+                        saved_filename = f
                         break
+            
+            # --- 🅱️ حالة الصورة ---
+            else:
+                print("🖼️ Type: Image - Downloading manually")
+                image_url = info.get('url') # yt-dlp جاب لينا الرابط المباشر
+                ext = info.get('ext', 'jpg')
+                if ext == 'none': ext = 'jpg'
+                
+                target_file = f"{DOWNLOAD_DIR}/{unique_name}.{ext}"
+                
+                # نحملوها بـ requests
+                success = download_image_manual(image_url, target_file)
+                
+                if success:
+                    saved_filename = f"{unique_name}.{ext}"
+                else:
+                    raise Exception("Failed to download image file")
 
             if not saved_filename:
-                raise Exception("Download failed. No media file found.")
+                raise Exception("File not found after processing.")
 
+            # تجهيز الرابط للرد
             basename = saved_filename
-            ext = os.path.splitext(saved_filename)[1].replace('.', '').lower()
-            media_type = "video" if ext not in ['jpg', 'jpeg', 'png', 'webp'] else "image"
-
+            final_ext = os.path.splitext(saved_filename)[1].replace('.', '').lower()
+            media_type = "video" if is_video else "image"
+            
             host_url = str(req.base_url).rstrip('/')
             local_download_url = f"{host_url}/get_file/{basename}"
 
             return {
                 "status": "success",
-                "title": "Media Download",
-                "download_url": local_download_url, # رابط من السيرفر ديالنا
-                "ext": ext,
+                "title": info.get('title', 'Instagram Media'),
+                "download_url": local_download_url,
+                "ext": final_ext,
                 "media_type": media_type,
             }
 
