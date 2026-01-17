@@ -14,7 +14,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 // --- CONFIGURATION ---
 // CHECK YOUR IP
-final String backendUrl = "https://sostaar04-downloader-video.hf.space/extract";
+final String backendUrl = "https://naval-holly-sosta04-e7fdb863.koyeb.app/";
 
 // --- STORAGE CONFIG ---
 // Folder name that will be created on the phone for this app

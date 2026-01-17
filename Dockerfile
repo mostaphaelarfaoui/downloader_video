@@ -1,5 +1,5 @@
 # Use Python base image
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 # Install FFmpeg (Required for yt-dlp)
 RUN apt-get update && \
