@@ -1,0 +1,19 @@
+name: Sync to Hugging Face hub
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sync-to-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          lfs: true
+      - name: Push to hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # 👇 هاد السطر هو المهم: تأكد أن السميات صحاح
+        run: git push https://sostaar04:$HF_TOKEN@huggingface.co/spaces/sostaar04/downloader_video main
