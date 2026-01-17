@@ -1,30 +1,31 @@
 # =========================
-# Backend (FastAPI / Python)
+# Python / Backend
 # =========================
 
-# Downloaded media
-backend/downloads/
+# ⚠️ أهم سطر: تجاهل البيئة الافتراضية (الفيروسات)
+venv/
+backend/venv/
+env/
+.venv/
 
 # Python cache
-backend/__pycache__/
-backend/**/__pycache__/
+__pycache__/
+*.py[cod]
+*$py.class
 
-# Media files inside backend (videos/images)
-backend/**/*.mp4
-backend/**/*.mkv
-backend/**/*.avi
-backend/**/*.mov
-backend/**/*.webm
-backend/**/*.jpg
-backend/**/*.jpeg
-backend/**/*.png
-backend/**/*.webp
-backend/**/*.gif
+# Downloaded media
+downloads/
+backend/downloads/
+
+# Binary files (Safety net)
+*.exe
+*.dll
+*.so
+*.dylib
 
 # Environment files
-backend/.env
 .env
-
+backend/.env
 
 # =========================
 # Flutter Frontend
@@ -40,15 +41,15 @@ frontend/.flutter-plugins-dependencies
 frontend/.packages
 frontend/pubspec.lock
 
-# Gradle / Android build
+# Android / iOS generated files
 frontend/android/.gradle/
 frontend/android/app/build/
-
+frontend/ios/Flutter/Generated.xcconfig
+frontend/ios/Flutter/flutter_export_environment.sh
 
 # =========================
 # IDE / Editors
 # =========================
-
 .vscode/
 .idea/
 *.iml
