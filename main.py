@@ -1,18 +1,10 @@
 import os
-import uuid
-import time
-import requests
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import yt_dlp
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
-
-DOWNLOAD_DIR = "downloads"
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,169 +16,197 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
-# --- دوال التنظيف ---
-def delete_file(path: str):
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-            print(f"🗑️ Auto-deleted: {path}")
-    except Exception as e:
-        print(f"⚠️ Error deleting file: {e}")
 
-def cleanup_stale_files():
-    current_time = time.time()
-    max_age = 300
-    try:
-        if not os.path.exists(DOWNLOAD_DIR):
-            return
-        files = os.listdir(DOWNLOAD_DIR)
-        for f in files:
-            file_path = os.path.join(DOWNLOAD_DIR, f)
-            if os.path.exists(file_path):
-                file_age = current_time - os.path.getmtime(file_path)
-                if file_age > max_age:
-                    try:
-                        os.remove(file_path)
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+def get_best_format_url(info: dict) -> str | None:
+    """
+    Extract the best quality direct URL from yt-dlp info.
+    Prioritizes formats with both video and audio combined.
+    """
+    formats = info.get('formats', [])
+    if not formats:
+        # If no formats list, try direct URL
+        return info.get('url')
+    
+    # First, try to find a format with both video and audio
+    best_combined = None
+    best_combined_quality = -1
+    
+    for fmt in formats:
+        has_video = fmt.get('vcodec') and fmt.get('vcodec') != 'none'
+        has_audio = fmt.get('acodec') and fmt.get('acodec') != 'none'
+        
+        if has_video and has_audio:
+            # Calculate quality score (higher is better)
+            height = fmt.get('height', 0) or 0
+            tbr = fmt.get('tbr', 0) or 0
+            quality = height * 1000 + tbr
+            
+            if quality > best_combined_quality:
+                best_combined_quality = quality
+                best_combined = fmt
+    
+    if best_combined:
+        return best_combined.get('url')
+    
+    # Fallback: get the best video-only format
+    best_video = None
+    best_video_quality = -1
+    
+    for fmt in formats:
+        has_video = fmt.get('vcodec') and fmt.get('vcodec') != 'none'
+        if has_video:
+            height = fmt.get('height', 0) or 0
+            tbr = fmt.get('tbr', 0) or 0
+            quality = height * 1000 + tbr
+            
+            if quality > best_video_quality:
+                best_video_quality = quality
+                best_video = fmt
+    
+    if best_video:
+        return best_video.get('url')
+    
+    # Ultimate fallback: return the 'url' field from info
+    return info.get('url')
 
-# --- دالة تحميل الصور يدوياً ---
-def download_image_manual(url, filename):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    try:
-        response = requests.get(url, headers=headers, stream=True, timeout=10)
-        if response.status_code == 200:
-            with open(filename, 'wb') as f:
-                for chunk in response.iter_content(1024):
-                    f.write(chunk)
-            return True
-    except Exception as e:
-        print(f"⚠️ Image download failed: {e}")
-    return False
 
-# --- الروابط (Endpoints) ---
+def get_thumbnail_url(info: dict) -> str | None:
+    """Extract the best thumbnail URL from info."""
+    # Direct thumbnail field
+    if info.get('thumbnail'):
+        return info.get('thumbnail')
+    
+    # Try thumbnails list (pick the last one, usually highest quality)
+    thumbnails = info.get('thumbnails', [])
+    if thumbnails:
+        return thumbnails[-1].get('url')
+    
+    return None
 
-@app.get("/get_file/{filename}")
-async def get_file(filename: str, background_tasks: BackgroundTasks):
-    file_path = os.path.join(DOWNLOAD_DIR, filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found or expired")
-    background_tasks.add_task(delete_file, file_path)
-    return FileResponse(file_path)
+
+def detect_source(url: str) -> str:
+    """Detect the source platform from URL."""
+    url_lower = url.lower()
+    if 'instagram' in url_lower:
+        return 'instagram'
+    elif 'tiktok' in url_lower:
+        return 'tiktok'
+    elif 'facebook' in url_lower or 'fb.watch' in url_lower:
+        return 'facebook'
+    elif 'youtube' in url_lower or 'youtu.be' in url_lower:
+        return 'youtube'
+    elif 'twitter' in url_lower or 'x.com' in url_lower:
+        return 'twitter'
+    else:
+        return 'unknown'
+
 
 @app.post("/extract")
-def extract_info(request: VideoRequest, req: Request):
-    cleanup_stale_files()
+def extract_info(request: VideoRequest):
     url = request.url.strip()
-    unique_name = str(uuid.uuid4())
 
-    # إعداد الكوكيز
+    # Cookie file setup
     cookie_file = "cookies.txt"
     use_cookies = os.path.exists(cookie_file)
 
-    # خيارات yt-dlp محسنة لتفادي الحظر
+    # yt-dlp options - CRUCIAL: download=False, we only extract info
     ydl_opts = {
-        'outtmpl': f'{DOWNLOAD_DIR}/{unique_name}.%(ext)s',
         'quiet': True,
-        'ignoreerrors': True, # ضروري باش ما يوقفش إلا فشل جزء
-        'noplaylist': True,   # كنحاولو نتفاداو البلايليست الطويلة
+        'ignoreerrors': True,
+        'noplaylist': True,
         'extract_flat': False,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'skip_download': True,  # Ensure no download happens
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        # Format selection: prefer best combined (video+audio), fallback to best available
+        'format': 'best[ext=mp4]/best/bestvideo+bestaudio/bestvideo/best',
     }
 
     if use_cookies:
         ydl_opts['cookiefile'] = cookie_file
 
     try:
-        print(f"⏳ Analyzing URL: {url}")
+        print(f"⏳ Extracting info for: {url}")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 1. استخراج المعلومات
+            # Extract info WITHOUT downloading
             info = ydl.extract_info(url, download=False)
             
-            # 🔥 الإصلاح الأول: التحقق من أن info ليس فارغاً
             if info is None:
-                raise HTTPException(status_code=400, detail="Instagram blocked the request or URL is invalid (Login Required).")
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Could not extract info. The URL may be invalid, private, or require login."
+                )
 
-            # 🔥 الإصلاح الثاني: التعامل مع ألبومات الصور (Carousel)
-            # إلا كان الرابط فيه بزاف التصاور، yt-dlp كيرد 'entries'
+            # Handle playlists/carousels - pick the first entry
             if 'entries' in info:
                 print("📸 Detected Carousel/Playlist, picking first entry...")
-                # خود أول وحدة فالألبوم
                 try:
-                    info = list(info['entries'])[0] 
-                except IndexError:
-                     raise HTTPException(status_code=400, detail="Empty playlist/carousel.")
+                    entries = list(info['entries'])
+                    if not entries:
+                        raise HTTPException(status_code=400, detail="Empty playlist/carousel.")
+                    info = entries[0]
+                    if info is None:
+                        raise HTTPException(status_code=400, detail="First entry in playlist is empty.")
+                except (IndexError, TypeError):
+                    raise HTTPException(status_code=400, detail="Could not extract from playlist/carousel.")
 
-            # 2. تحديد النوع (فيديو ولا صورة)
+            # Determine media type
             is_video = True
-            # yt-dlp كيعطي vcodec='none' للصور، أو ext كيكون jpg/png
             if info.get('vcodec') == 'none' or info.get('ext') in ['jpg', 'jpeg', 'png', 'webp', 'heic']:
                 is_video = False
+
+            # Get the direct URL
+            direct_url = get_best_format_url(info)
             
-            # --- الحالة A: فيديو ---
-            if is_video:
-                print("🎥 Type: Video - Downloading...")
-                # نعاودو التحميل لهاد الرابط المحدد فقط
-                ydl.download([info.get('webpage_url', url)])
-                
-                saved_filename = None
-                for f in os.listdir(DOWNLOAD_DIR):
-                    if f.startswith(unique_name) and f.lower().endswith((".mp4", ".mkv", ".mov", ".webm")):
-                        saved_filename = f
-                        break
+            if not direct_url:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Could not extract direct download URL. The media may be protected."
+                )
+
+            # Get metadata
+            title = info.get('title', 'Untitled Media')
+            if title:
+                title = title[:100]  # Limit title length
             
-            # --- الحالة B: صورة ---
-            else:
-                print("🖼️ Type: Image - Downloading manually...")
-                image_url = info.get('url')
-                if not image_url:
-                     # محاولة استخراج رابط بديل إذا كان الأول فارغ
-                     image_url = info.get('thumbnails', [{}])[-1].get('url')
-
-                if not image_url:
-                    raise Exception("Could not find image URL")
-
-                ext = info.get('ext', 'jpg')
-                if ext == 'none': ext = 'jpg'
-                
-                target_file = f"{DOWNLOAD_DIR}/{unique_name}.{ext}"
-                success = download_image_manual(image_url, target_file)
-                
-                if success:
-                    saved_filename = f"{unique_name}.{ext}"
-                else:
-                    raise Exception("Failed to download image file via requests")
-
-            # التحقق النهائي
-            if not saved_filename:
-                raise Exception("File not found on server after processing.")
-
-            basename = saved_filename
-            final_ext = os.path.splitext(saved_filename)[1].replace('.', '').lower()
+            thumbnail = get_thumbnail_url(info)
+            source = detect_source(url)
+            ext = info.get('ext', 'mp4')
             media_type = "video" if is_video else "image"
             
-            host_url = str(req.base_url).rstrip('/')
-            local_download_url = f"{host_url}/get_file/{basename}"
+            # Duration in seconds (if available)
+            duration = info.get('duration')
+            
+            # File size (if available, in bytes)
+            filesize = info.get('filesize') or info.get('filesize_approx')
 
+            print(f"✅ Extracted successfully: {title}")
+            print(f"   Direct URL: {direct_url[:80]}...")
+            
             return {
                 "status": "success",
-                "title": info.get('title', 'Instagram Media')[:100],
-                "download_url": local_download_url,
-                "ext": final_ext,
+                "direct_url": direct_url,
+                "title": title,
+                "thumbnail": thumbnail,
+                "source": source,
+                "ext": ext if ext and ext != 'none' else 'mp4',
                 "media_type": media_type,
+                "duration": duration,
+                "filesize": filesize,
             }
 
     except HTTPException as he:
         raise he
     except Exception as e:
         print(f"🔥 Error: {str(e)}")
-        # نرسلو الخطأ للتطبيق باش يبان ليك
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint."""
+    return {"status": "ok", "message": "Server is running"}
+
 
 if __name__ == "__main__":
     import uvicorn

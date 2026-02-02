@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:video_player/video_player.dart';
 
 import 'package:chewie/chewie.dart';
@@ -91,7 +92,7 @@ Future<void> _initNotifications() async {
       AndroidFlutterLocalNotificationsPlugin>()?.requestNotificationsPermission();
 }
 
-Future<void> _showProgressNotification(int id, int progress) async {
+Future<void> _showProgressNotification(int id, int progress, String title) async {
   final AndroidNotificationDetails androidPlatformChannelSpecifics =
       AndroidNotificationDetails(
     'download_channel', 'Downloads',
@@ -104,7 +105,7 @@ Future<void> _showProgressNotification(int id, int progress) async {
     progress: progress,
   );
   await flutterLocalNotificationsPlugin.show(
-      id, 'Downloading...', '$progress%', NotificationDetails(android: androidPlatformChannelSpecifics));
+      id, 'Downloading: $title', '$progress%', NotificationDetails(android: androidPlatformChannelSpecifics));
 }
 
 Future<void> _showCompletionNotification(int id, String title) async {
@@ -116,6 +117,62 @@ Future<void> _showCompletionNotification(int id, String title) async {
   );
   await flutterLocalNotificationsPlugin.show(
       id, 'Download Complete', 'Saved: $title', const NotificationDetails(android: androidPlatformChannelSpecifics));
+}
+
+// --- PERMISSION HANDLING ---
+Future<bool> _requestStoragePermission() async {
+  if (Platform.isAndroid) {
+    // For Android 13+ (API 33+), we don't need WRITE_EXTERNAL_STORAGE
+    // but we may need MANAGE_EXTERNAL_STORAGE for Downloads folder access
+    final sdkInt = await _getAndroidSdkVersion();
+    
+    if (sdkInt >= 33) {
+      // Android 13+: Check for media permissions
+      final photos = await Permission.photos.status;
+      final videos = await Permission.videos.status;
+      
+      if (!photos.isGranted || !videos.isGranted) {
+        final results = await [
+          Permission.photos,
+          Permission.videos,
+        ].request();
+        
+        return results[Permission.photos]?.isGranted == true ||
+               results[Permission.videos]?.isGranted == true;
+      }
+      return true;
+    } else if (sdkInt >= 30) {
+      // Android 11-12: Need manage external storage or scoped access
+      final storage = await Permission.storage.status;
+      if (!storage.isGranted) {
+        final result = await Permission.storage.request();
+        return result.isGranted;
+      }
+      return true;
+    } else {
+      // Android 10 and below
+      final storage = await Permission.storage.status;
+      if (!storage.isGranted) {
+        final result = await Permission.storage.request();
+        return result.isGranted;
+      }
+      return true;
+    }
+  }
+  // iOS doesn't need explicit storage permission for app documents
+  return true;
+}
+
+Future<int> _getAndroidSdkVersion() async {
+  try {
+    if (Platform.isAndroid) {
+      // Use ProcessResult to get SDK version
+      final result = await Process.run('getprop', ['ro.build.version.sdk']);
+      final sdk = int.tryParse(result.stdout.toString().trim());
+      return sdk ?? 30;
+    }
+  } catch (_) {}
+  return 30; // Default fallback
 }
 
 void main() async {
@@ -140,20 +197,192 @@ class MyApp extends StatelessWidget {
   }
 }
 
+// --- UI HELPER: TOP MESSAGE BAR ---
+class TopMessageBar {
+  static void show(
+    BuildContext context,
+    String message, {
+    Color backgroundColor = const Color(0xFF323232),
+    Duration duration = const Duration(seconds: 3),
+  }) {
+    final overlay = Overlay.of(context);
+    if (overlay == null) return;
+
+    final overlayEntry = OverlayEntry(
+      builder: (ctx) {
+        final size = MediaQuery.of(ctx).size;
+        final paddingTop = MediaQuery.of(ctx).padding.top;
+        return Positioned(
+          top: paddingTop + 16,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Material(
+              color: Colors.transparent,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: size.width * 0.8,
+                ),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: backgroundColor,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Colors.black54,
+                        blurRadius: 8,
+                        offset: Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Text(
+                    message,
+                    textAlign: TextAlign.center,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    overlay.insert(overlayEntry);
+    Future.delayed(duration, () {
+      if (overlayEntry.mounted) {
+        overlayEntry.remove();
+      }
+    });
+  }
+}
+
+// --- VIDEO INFO MODEL ---
+class VideoInfo {
+  final String directUrl;
+  final String title;
+  final String? thumbnail;
+  final String source;
+  final String ext;
+  final String mediaType;
+  final int? duration;
+  final int? filesize;
+
+  VideoInfo({
+    required this.directUrl,
+    required this.title,
+    this.thumbnail,
+    required this.source,
+    required this.ext,
+    required this.mediaType,
+    this.duration,
+    this.filesize,
+  });
+
+  factory VideoInfo.fromJson(Map<String, dynamic> json) {
+    return VideoInfo(
+      directUrl: json['direct_url'] ?? '',
+      title: json['title'] ?? 'Untitled',
+      thumbnail: json['thumbnail'],
+      source: json['source'] ?? 'unknown',
+      ext: json['ext'] ?? 'mp4',
+      mediaType: json['media_type'] ?? 'video',
+      duration: json['duration'],
+      filesize: json['filesize'],
+    );
+  }
+}
+
+// --- DOWNLOAD SERVICE ---
+class DownloadService {
+  final Dio _dio;
+  
+  DownloadService() : _dio = Dio(BaseOptions(
+    connectTimeout: const Duration(seconds: 30),
+    receiveTimeout: const Duration(minutes: 30),
+    sendTimeout: const Duration(seconds: 60),
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    },
+  ));
+
+  /// Extract video info from the backend (no download on server)
+  Future<VideoInfo> extractVideoInfo(String url) async {
+    final response = await _dio.post(
+      backendUrl,
+      data: {"url": url},
+    );
+
+    final data = response.data;
+    if (data is! Map<String, dynamic>) {
+      throw Exception('Unexpected server response');
+    }
+
+    if (data['status'] != 'success') {
+      final serverMessage = data['detail']?.toString() ?? data['message']?.toString();
+      throw Exception(serverMessage ?? 'Server could not extract this media.');
+    }
+
+    return VideoInfo.fromJson(data);
+  }
+
+  /// Download video directly from the direct URL to local storage
+  Future<String> downloadVideo({
+    required String directUrl,
+    required String fileName,
+    required String savePath,
+    CancelToken? cancelToken,
+    required void Function(int received, int total) onProgress,
+  }) async {
+    // Configure Dio for large file downloads with custom headers
+    final downloadDio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 30),
+      receiveTimeout: const Duration(minutes: 30),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+      },
+    ));
+
+    await downloadDio.download(
+      directUrl,
+      savePath,
+      cancelToken: cancelToken,
+      onReceiveProgress: onProgress,
+      options: Options(
+        responseType: ResponseType.stream,
+        followRedirects: true,
+        maxRedirects: 5,
+      ),
+    );
+
+    return savePath;
+  }
+}
+
 // --- SHARED DOWNLOAD MANAGER ---
 class DownloadManager {
+  static final DownloadService _downloadService = DownloadService();
+
   static Future<void> startDownload(
     BuildContext context,
     String url, {
     void Function(String status)? onStatusChange,
     void Function(int progress)? onProgress,
+    void Function(VideoInfo? info)? onVideoInfoReceived,
     CancelToken? cancelToken,
   }) async {
     if (url.isEmpty) return;
     
     // Show immediate feedback
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("\u23f3 Analyzing link... Please wait.")),
+    TopMessageBar.show(
+      context,
+      "\u23f3 Analyzing...",
+      duration: const Duration(seconds: 2),
     );
 
     onStatusChange?.call("Preparing...");
@@ -162,79 +391,81 @@ class DownloadManager {
     int notificationId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
     try {
-      BaseOptions options = BaseOptions(
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 120),
-        sendTimeout: const Duration(seconds: 60),
-      );
+      // Step 1: Request storage permission
+      onStatusChange?.call("Checking permissions...");
+      final hasPermission = await _requestStoragePermission();
+      if (!hasPermission) {
+        throw Exception('Storage permission denied. Please grant permission in settings.');
+      }
 
-      // 1. Backend Request
-      onStatusChange?.call("Contacting server...");
-      final response = await Dio(options).post(
-        backendUrl, 
-        data: {"url": url},
-      );
+      // Step 2: Extract video info from backend (NO download on server)
+      onStatusChange?.call("Extracting video info...");
+      final videoInfo = await _downloadService.extractVideoInfo(url);
       
-      final data = response.data;
-      if (data is! Map) {
-        throw Exception('Unexpected server response');
+      onVideoInfoReceived?.call(videoInfo);
+
+      if (videoInfo.directUrl.isEmpty) {
+        throw Exception('Could not get direct download URL');
       }
 
-      if (data['status'] != 'success') {
-        final serverMessage = data['message']?.toString();
-        throw Exception(serverMessage == null || serverMessage.isEmpty
-            ? 'Server could not extract this media.'
-            : serverMessage);
-      }
-
-      final downloadUrl = data['download_url']?.toString();
-      final ext = data['ext']?.toString();
-      final mediaType = data['media_type']?.toString() ?? "video";
-
-      if (downloadUrl == null || ext == null || downloadUrl.isEmpty || ext.isEmpty) {
-        throw Exception('Server returned invalid download information.');
-      }
-
+      // Step 3: Prepare save path
       final appDir = await _getAppStorageDir();
       String fileName;
-      if (mediaType == "video") {
+      if (videoInfo.mediaType == "video") {
         final n = await _getAndReserveNextVideoNumber();
-        fileName = "Video $n.$ext";
+        fileName = "Video $n.${videoInfo.ext}";
       } else {
-        fileName = "Image_${DateTime.now().millisecondsSinceEpoch}.$ext";
+        fileName = "Image_${DateTime.now().millisecondsSinceEpoch}.${videoInfo.ext}";
       }
 
       final savePath = "${appDir.path}/$fileName";
 
       // Notify start
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("\u2b07\ufe0f Downloading $mediaType in background...")),
+      TopMessageBar.show(
+        context,
+        "\u2b07\ufe0f Downloading ${videoInfo.mediaType}...\n${videoInfo.title}",
+        duration: const Duration(seconds: 2),
       );
 
-      onStatusChange?.call("Downloading $mediaType...");
+      onStatusChange?.call("Downloading ${videoInfo.mediaType}...");
 
-      // 2. Download File
-      await Dio(options).download(
-        downloadUrl,
-        savePath,
+      // Step 4: Download file directly from direct URL (CLIENT-SIDE DOWNLOAD)
+      int lastNotifiedPercent = 0;
+      
+      await _downloadService.downloadVideo(
+        directUrl: videoInfo.directUrl,
+        fileName: fileName,
+        savePath: savePath,
         cancelToken: cancelToken,
-        onReceiveProgress: (received, total) {
-          if (total != -1) {
+        onProgress: (received, total) {
+          if (total != -1 && total > 0) {
             int percent = ((received / total) * 100).toInt();
-            if (percent % 10 == 0) _showProgressNotification(notificationId, percent);
+            
+            // Update UI progress
             onProgress?.call(percent);
+            
+            // Update notification (throttle to every 5%)
+            if (percent >= lastNotifiedPercent + 5 || percent == 100) {
+              lastNotifiedPercent = percent;
+              _showProgressNotification(notificationId, percent, videoInfo.title);
+            }
           }
         },
       );
 
+      // Step 5: Show completion
       _showCompletionNotification(notificationId, fileName);
       
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("\u2705 Download Complete! Saved in My Downloader folder.")),
+      TopMessageBar.show(
+        context,
+        "\u2705 Download Complete!\nSaved: $fileName",
+        backgroundColor: Colors.green,
+        duration: const Duration(seconds: 3),
       );
 
       onProgress?.call(100);
-      onStatusChange?.call("Completed");
+      onStatusChange?.call("Completed: $fileName");
+
     } catch (e) {
       String errorMessage = "Download Failed";
       
@@ -247,32 +478,30 @@ class DownloadManager {
           if (data is Map && data['detail'] != null) {
             errorMessage = data['detail'].toString();
           } else {
-            // Fallback generic message
             errorMessage = "Server Error: Video locked or Login required.";
           }
         } else if (e.type == DioExceptionType.connectionTimeout) {
-          errorMessage = "Connection Timeout. Check Server.";
+          errorMessage = "Connection Timeout. Check your internet.";
+        } else if (e.type == DioExceptionType.receiveTimeout) {
+          errorMessage = "Download timed out. Try again.";
+        } else if (e.response?.statusCode == 403) {
+          errorMessage = "Access denied. The direct URL may have expired.";
+        } else if (e.response?.statusCode == 404) {
+          errorMessage = "File not found on server.";
         } else {
-          errorMessage = "${e.message}";
+          errorMessage = e.message ?? "Network error occurred";
         }
       } else {
-        errorMessage = e.toString();
-      }
-
-      // Special case: Instagram image posts not supported by backend/yt-dlp
-      if (errorMessage.contains('No media file found (Video or Image)')) {
-        errorMessage =
-            'Instagram: هذا المنشور غير مدعوم حالياً (خصوصاً بعض الصور). جرّب Reel أو فيديو آخر.';
+        errorMessage = e.toString().replaceAll('Exception: ', '');
       }
 
       // Show a shorter, cleaner error message (different color if cancelled)
       final isCancelled = errorMessage == "Download cancelled";
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(errorMessage, maxLines: 2, overflow: TextOverflow.ellipsis),
-          backgroundColor: isCancelled ? Colors.orange : Colors.redAccent,
-          behavior: SnackBarBehavior.floating,
-        ),
+      TopMessageBar.show(
+        context,
+        errorMessage,
+        backgroundColor: isCancelled ? Colors.orange : Colors.redAccent,
+        duration: const Duration(seconds: 4),
       );
 
       onStatusChange?.call(errorMessage);
@@ -329,6 +558,7 @@ class _DownloaderTabState extends State<DownloaderTab> {
   String _downloadStatus = "";
   bool _isDownloading = false;
   CancelToken? _cancelToken;
+  VideoInfo? _currentVideoInfo;
 
   Future<void> _pasteLink() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -346,12 +576,12 @@ class _DownloaderTabState extends State<DownloaderTab> {
       _downloadProgress = 0.0;
       _downloadStatus = "Preparing...";
       _cancelToken = CancelToken();
+      _currentVideoInfo = null;
     });
 
     await DownloadManager.startDownload(
       context,
       _urlController.text,
-
       onStatusChange: (status) {
         if (!mounted) return;
         setState(() {
@@ -362,6 +592,12 @@ class _DownloaderTabState extends State<DownloaderTab> {
         if (!mounted) return;
         setState(() {
           _downloadProgress = percent / 100.0;
+        });
+      },
+      onVideoInfoReceived: (info) {
+        if (!mounted) return;
+        setState(() {
+          _currentVideoInfo = info;
         });
       },
       cancelToken: _cancelToken,
@@ -384,80 +620,255 @@ class _DownloaderTabState extends State<DownloaderTab> {
     });
   }
 
+  String _formatFileSize(int? bytes) {
+    if (bytes == null) return '';
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  String _formatDuration(int? seconds) {
+    if (seconds == null) return '';
+    final minutes = seconds ~/ 60;
+    final secs = seconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text("Manual Download")),
-      body: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            TextField(
-              controller: _urlController,
-              decoration: InputDecoration(
-                labelText: "Paste Video Link",
-                border: const OutlineInputBorder(),
-                suffixIcon: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () {
-                        _urlController.clear();
-                      },
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.paste),
-                      onPressed: _pasteLink,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _isDownloading ? null : _startDownload,
-                    icon: const Icon(Icons.download),
-                    label: const Text("Start Download"),
-                    style: ElevatedButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 50),
-                    ),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _urlController,
+                decoration: InputDecoration(
+                  labelText: "Paste Video Link",
+                  border: const OutlineInputBorder(),
+                  suffixIcon: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () {
+                          _urlController.clear();
+                          setState(() {
+                            _currentVideoInfo = null;
+                            _downloadProgress = 0.0;
+                            _downloadStatus = "";
+                          });
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.paste),
+                        onPressed: _pasteLink,
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _isDownloading ? _cancelDownload : null,
-                    icon: const Icon(Icons.cancel),
-                    label: const Text("Cancel"),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.redAccent,
-                      minimumSize: const Size(double.infinity, 50),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isDownloading ? null : _startDownload,
+                      icon: const Icon(Icons.download),
+                      label: const Text("Start Download"),
+                      style: ElevatedButton.styleFrom(
+                        minimumSize: const Size(double.infinity, 50),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isDownloading ? _cancelDownload : null,
+                      icon: const Icon(Icons.cancel),
+                      label: const Text("Cancel"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.redAccent,
+                        minimumSize: const Size(double.infinity, 50),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              // Video Info Card
+              if (_currentVideoInfo != null) ...[
+                const SizedBox(height: 20),
+                Card(
+                  elevation: 4,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Thumbnail
+                        if (_currentVideoInfo!.thumbnail != null)
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.network(
+                              _currentVideoInfo!.thumbnail!,
+                              height: 150,
+                              width: double.infinity,
+                              fit: BoxFit.cover,
+                              errorBuilder: (context, error, stackTrace) =>
+                                  Container(
+                                    height: 150,
+                                    color: Colors.grey[800],
+                                    child: const Center(
+                                      child: Icon(Icons.image_not_supported, size: 50),
+                                    ),
+                                  ),
+                            ),
+                          ),
+                        const SizedBox(height: 12),
+                        // Title
+                        Text(
+                          _currentVideoInfo!.title,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 8),
+                        // Metadata row
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 8,
+                          children: [
+                            Chip(
+                              label: Text(_currentVideoInfo!.source.toUpperCase()),
+                              backgroundColor: _getSourceColor(_currentVideoInfo!.source),
+                            ),
+                            Chip(
+                              label: Text(_currentVideoInfo!.mediaType.toUpperCase()),
+                              avatar: Icon(
+                                _currentVideoInfo!.mediaType == 'video'
+                                    ? Icons.videocam
+                                    : Icons.image,
+                                size: 18,
+                              ),
+                            ),
+                            if (_currentVideoInfo!.duration != null)
+                              Chip(
+                                label: Text(_formatDuration(_currentVideoInfo!.duration)),
+                                avatar: const Icon(Icons.timer, size: 18),
+                              ),
+                            if (_currentVideoInfo!.filesize != null)
+                              Chip(
+                                label: Text(_formatFileSize(_currentVideoInfo!.filesize)),
+                                avatar: const Icon(Icons.storage, size: 18),
+                              ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ),
               ],
-            ),
 
-            if (_isDownloading || _downloadProgress > 0) ...[
-              const SizedBox(height: 20),
-              LinearProgressIndicator(
-                value: _downloadProgress == 0.0 ? null : _downloadProgress,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _downloadStatus,
-                textAlign: TextAlign.center,
-              ),
+              // Progress Section
+              if (_isDownloading || _downloadProgress > 0) ...[
+                const SizedBox(height: 20),
+                Column(
+                  children: [
+                    // Progress bar with percentage
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: LinearProgressIndicator(
+                              value: _downloadProgress == 0.0 ? null : _downloadProgress,
+                              minHeight: 12,
+                              backgroundColor: Colors.grey[800],
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                _downloadProgress >= 1.0 ? Colors.green : Colors.blue,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          '${(_downloadProgress * 100).toInt()}%',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    // Status text
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[900],
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (_isDownloading && _downloadProgress < 1.0)
+                            const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          if (_isDownloading && _downloadProgress < 1.0)
+                            const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              _downloadStatus,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: _downloadStatus.contains("Completed")
+                                    ? Colors.green
+                                    : _downloadStatus.contains("Failed") ||
+                                            _downloadStatus.contains("Error")
+                                        ? Colors.red
+                                        : Colors.white70,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
+  }
+
+  Color _getSourceColor(String source) {
+    switch (source.toLowerCase()) {
+      case 'instagram':
+        return Colors.purple.withOpacity(0.3);
+      case 'tiktok':
+        return Colors.cyan.withOpacity(0.3);
+      case 'facebook':
+        return Colors.blue.withOpacity(0.3);
+      case 'youtube':
+        return Colors.red.withOpacity(0.3);
+      case 'twitter':
+        return Colors.lightBlue.withOpacity(0.3);
+      default:
+        return Colors.grey.withOpacity(0.3);
+    }
   }
 }
 
@@ -521,6 +932,9 @@ class WebViewScreen extends StatefulWidget {
 
 class _WebViewScreenState extends State<WebViewScreen> {
   late final WebViewController _controller;
+  bool _isDownloading = false;
+  double _downloadProgress = 0.0;
+  String _downloadStatus = "";
 
   @override
   void initState() {
@@ -633,8 +1047,12 @@ class _WebViewScreenState extends State<WebViewScreen> {
   }
 
   void _handleDownload() async {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("🔍 Detecting video..."), duration: Duration(milliseconds: 500)),
+    if (_isDownloading) return;
+
+    TopMessageBar.show(
+      context,
+      "🔍 Detecting media... ",
+      duration: const Duration(milliseconds: 500),
     );
 
     String? targetUrl = await _getRealLink();
@@ -665,18 +1083,41 @@ class _WebViewScreenState extends State<WebViewScreen> {
     if (targetUrl == null ||
         targetUrl.trim() == "https://www.tiktok.com/" ||
         targetUrl.trim() == "https://www.instagram.com/") {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("⚠️ Open the video fully or wait a moment!"),
-          backgroundColor: Colors.orange,
-        ),
+      TopMessageBar.show(
+        context,
+        "⚠️ Open the video fully or wait a moment!",
+        backgroundColor: Colors.orange,
       );
       return;
     }
 
     debugPrint("🎯 Sending to Backend: $targetUrl");
+    
+    setState(() {
+      _isDownloading = true;
+      _downloadProgress = 0.0;
+      _downloadStatus = "Preparing...";
+    });
+
     if (mounted) {
-      DownloadManager.startDownload(context, targetUrl);
+      await DownloadManager.startDownload(
+        context,
+        targetUrl,
+        onStatusChange: (status) {
+          if (!mounted) return;
+          setState(() => _downloadStatus = status);
+        },
+        onProgress: (percent) {
+          if (!mounted) return;
+          setState(() => _downloadProgress = percent / 100.0);
+        },
+      );
+    }
+
+    if (mounted) {
+      setState(() {
+        _isDownloading = false;
+      });
     }
   }
 
@@ -687,7 +1128,67 @@ class _WebViewScreenState extends State<WebViewScreen> {
       body: Stack(
         children: [
           WebViewWidget(controller: _controller),
-          DraggableFloatingButton(onPressed: _handleDownload),
+          
+          // Download progress overlay
+          if (_isDownloading)
+            Positioned(
+              bottom: 80,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.black87,
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.3),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: LinearProgressIndicator(
+                              value: _downloadProgress == 0.0 ? null : _downloadProgress,
+                              minHeight: 8,
+                              backgroundColor: Colors.grey[700],
+                              valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          '${(_downloadProgress * 100).toInt()}%',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      _downloadStatus,
+                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          
+          DraggableFloatingButton(
+            onPressed: _handleDownload,
+            isLoading: _isDownloading,
+          ),
         ],
       ),
     );
@@ -697,7 +1198,12 @@ class _WebViewScreenState extends State<WebViewScreen> {
 // --- NEW WIDGET: DRAGGABLE BUTTON ---
 class DraggableFloatingButton extends StatefulWidget {
   final VoidCallback onPressed;
-  const DraggableFloatingButton({super.key, required this.onPressed});
+  final bool isLoading;
+  const DraggableFloatingButton({
+    super.key,
+    required this.onPressed,
+    this.isLoading = false,
+  });
 
   @override
   State<DraggableFloatingButton> createState() => _DraggableFloatingButtonState();
@@ -733,9 +1239,20 @@ class _DraggableFloatingButtonState extends State<DraggableFloatingButton> {
         },
         child: FloatingActionButton(
           mini: true, // Smaller size
-          backgroundColor: Colors.redAccent.withOpacity(0.9),
-          onPressed: widget.onPressed,
-          child: const Icon(Icons.download, size: 20, color: Colors.white),
+          backgroundColor: widget.isLoading 
+              ? Colors.orange.withOpacity(0.9) 
+              : Colors.redAccent.withOpacity(0.9),
+          onPressed: widget.isLoading ? null : widget.onPressed,
+          child: widget.isLoading
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(Icons.download, size: 20, color: Colors.white),
         ),
       ),
     );
@@ -769,7 +1286,9 @@ class _GalleryTabState extends State<GalleryTab> {
 
         return path.endsWith(".mp4") ||
             path.endsWith(".jpg") ||
-            path.endsWith(".png");
+            path.endsWith(".png") ||
+            path.endsWith(".webm") ||
+            path.endsWith(".mkv");
       }).toList().reversed.toList();
       _loading = false;
     });
@@ -815,22 +1334,32 @@ class _GalleryTabState extends State<GalleryTab> {
       if (!mounted) return;
       await _loadFiles();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Deleted")),
+      TopMessageBar.show(
+        context,
+        "Deleted",
+        backgroundColor: Colors.green,
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Delete failed: $e")),
+      TopMessageBar.show(
+        context,
+        "Delete failed: $e",
+        backgroundColor: Colors.redAccent,
+        duration: const Duration(seconds: 3),
       );
     }
   }
 
   Future<void> _deleteAllVideos() async {
-    final videos = _files.where((f) => f.path.toLowerCase().endsWith('.mp4')).toList();
+    final videos = _files.where((f) {
+      final path = f.path.toLowerCase();
+      return path.endsWith('.mp4') || path.endsWith('.webm') || path.endsWith('.mkv');
+    }).toList();
+    
     if (videos.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("No videos to delete")),
+      TopMessageBar.show(
+        context,
+        "No videos to delete",
       );
       return;
     }
@@ -855,13 +1384,16 @@ class _GalleryTabState extends State<GalleryTab> {
     if (!mounted) return;
     await _loadFiles();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Deleted $deleted video(s)")),
+    TopMessageBar.show(
+      context,
+      "Deleted $deleted video(s)",
+      backgroundColor: Colors.green,
     );
   }
 
   void _openMedia(String path) {
-    if (path.endsWith(".mp4")) {
+    final lowerPath = path.toLowerCase();
+    if (lowerPath.endsWith(".mp4") || lowerPath.endsWith(".webm") || lowerPath.endsWith(".mkv")) {
       Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => VideoPlayerScreen(path: path)),
@@ -896,7 +1428,10 @@ class _GalleryTabState extends State<GalleryTab> {
                   itemCount: _files.length,
                   itemBuilder: (context, index) {
                     final file = _files[index];
-                    final isVideo = file.path.endsWith(".mp4");
+                    final lowerPath = file.path.toLowerCase();
+                    final isVideo = lowerPath.endsWith(".mp4") || 
+                                   lowerPath.endsWith(".webm") || 
+                                   lowerPath.endsWith(".mkv");
                     return Card(
                       margin: const EdgeInsets.symmetric(
                         horizontal: 10,
