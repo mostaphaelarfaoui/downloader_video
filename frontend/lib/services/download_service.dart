@@ -15,7 +15,7 @@ class DownloadService {
 
   static final Dio _dio = Dio(
     BaseOptions(
-      connectTimeout: const Duration(seconds: 15),
+      connectTimeout: const Duration(seconds: 120),
       receiveTimeout: const Duration(minutes: 10),
       sendTimeout: const Duration(seconds: 60),
     ),
@@ -49,6 +49,12 @@ class DownloadService {
       final directUrl = data['direct_url'] as String;
       final ext = data['ext'] as String;
       final mediaType = data['media_type'] as String;
+      
+      // Get headers if available (User-Agent, Cookies, etc.)
+      Map<String, dynamic>? headers;
+      if (data['headers'] != null) {
+        headers = Map<String, dynamic>.from(data['headers']);
+      }
 
       // ── Step 2: Resolve local save path ───────────────────────
       final appDir = await StorageService.getAppStorageDir();
@@ -62,17 +68,23 @@ class DownloadService {
       final savePath = "${appDir.path}/$fileName";
 
       // ── Step 3: Download directly from source (client-side) ──
-      TopMessageBar.show(
-        context,
-        "⬇️ Downloading $mediaType…",
-        duration: const Duration(seconds: 2),
-      );
+      if (context.mounted) {
+        TopMessageBar.show(
+          context,
+          "⬇️ Downloading $mediaType…",
+          duration: const Duration(seconds: 2),
+        );
+      }
       onStatusChange?.call("Downloading $mediaType…");
 
       await _dio.download(
         directUrl,
         savePath,
         cancelToken: cancelToken,
+        options: Options(
+          headers: headers,
+          validateStatus: (status) => status != null && status < 500, // Accept redirects/403s potentially handled by dio
+        ),
         onReceiveProgress: (received, total) {
           if (total != -1) {
             final percent = ((received / total) * 100).toInt();
@@ -86,12 +98,14 @@ class DownloadService {
 
       // ── Step 4: Success ──────────────────────────────────────
       NotificationService.showCompletion(notificationId, fileName);
-      TopMessageBar.show(
-        context,
-        "✅ Download Complete!",
-        backgroundColor: Colors.green,
-        duration: const Duration(seconds: 2),
-      );
+      if (context.mounted) {
+        TopMessageBar.show(
+          context,
+          "✅ Download Complete!",
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 2),
+        );
+      }
       onProgress?.call(100);
       onStatusChange?.call("Completed");
       onComplete?.call();

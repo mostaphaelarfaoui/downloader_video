@@ -24,9 +24,9 @@ class SettingsScreen extends StatelessWidget {
             child: ListTile(
               leading: const Icon(Icons.dns),
               title: const Text("Backend URL"),
-              subtitle: Text(
+              subtitle: const Text(
                 AppConfig.backendBaseUrl,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                style: TextStyle(fontFamily: 'monospace', fontSize: 12),
               ),
               trailing: const Icon(Icons.info_outline),
               onTap: () => _showInfoDialog(context),
@@ -40,27 +40,28 @@ class SettingsScreen extends StatelessWidget {
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
-          Card(
+          const Card(
             child: ListTile(
-              leading: const Icon(Icons.info),
-              title: const Text(AppConfig.appName),
-              subtitle: const Text("Version 2.0.0"),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.folder),
-              title: const Text("Storage Folder"),
-              subtitle: const Text(AppConfig.appFolderName),
+              leading: Icon(Icons.info),
+              title: Text(AppConfig.appName),
+              subtitle: Text("Version 2.0.0"),
             ),
           ),
           const SizedBox(height: 8),
           const Card(
             child: ListTile(
-              leading: Icon(Icons.architecture),
-              title: Text("Architecture"),
-              subtitle: Text(
+              leading: Icon(Icons.folder),
+              title: Text("Storage Folder"),
+              subtitle: Text(AppConfig.appFolderName),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Card(
+            child: ListTile(
+              tileColor: Colors.redAccent.withValues(alpha: 0.9),
+              leading: const Icon(Icons.architecture),
+              title: const Text("Architecture"),
+              subtitle: const Text(
                 "Client-side downloading\n"
                 "Backend: Link extraction only",
               ),

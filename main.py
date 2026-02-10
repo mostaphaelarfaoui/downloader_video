@@ -89,16 +89,16 @@ def _get_cookie_file(request_cookies_b64: str | None) -> str | None:
 
 @app.post("/extract")
 @limiter.limit("10/minute")
-def extract_info(request: VideoRequest, req: Request):
+def extract_info(video_request: VideoRequest, request: Request):
     """
     Extract direct media URL and metadata.
     Returns JSON with direct_url for client-side downloading.
     """
-    url = request.url.strip()
+    url = video_request.url.strip()
     if not url.startswith("http"):
         raise HTTPException(status_code=400, detail="Invalid URL. Must start with http(s).")
 
-    cookie_file = _get_cookie_file(request.cookies)
+    cookie_file = _get_cookie_file(video_request.cookies)
 
     ydl_opts = {
         "quiet": True,
@@ -111,6 +111,12 @@ def extract_info(request: VideoRequest, req: Request):
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+                "player_skip": ["web_safari", "web_creator"],
+            }
+        },
     }
 
     if cookie_file:
@@ -145,19 +151,35 @@ def extract_info(request: VideoRequest, req: Request):
 
             # Get the best direct URL
             direct_url = info.get("url")
+            http_headers = info.get("http_headers", {})
 
-            # For videos, try to get the best format URL
+            # For videos, try to get the best format URL (Prioritize MP4 with Audio+Video)
             if is_video and not direct_url:
                 formats = info.get("formats", [])
                 if formats:
-                    # Pick best quality with both video+audio, fallback to last
                     best = None
+                    # First pass: Look for mp4 with both audio and video
                     for f in formats:
-                        if f.get("vcodec") != "none" and f.get("acodec") != "none":
+                        if (f.get("vcodec") != "none" and 
+                            f.get("acodec") != "none" and 
+                            f.get("ext") == "mp4"):
                             best = f
+                            # Keep looking for a better quality one (formats are usually sorted)
+                    
+                    # Second pass: If no mp4, look for any container with both
+                    if best is None:
+                        for f in formats:
+                            if f.get("vcodec") != "none" and f.get("acodec") != "none":
+                                best = f
+                    
+                    # Fallback
                     if best is None:
                         best = formats[-1]
+                        
                     direct_url = best.get("url")
+                    # Update headers if specific format has them
+                    if best.get("http_headers"):
+                        http_headers = best.get("http_headers")
 
             # For images, try thumbnail as fallback
             if not is_video and not direct_url:
@@ -174,6 +196,10 @@ def extract_info(request: VideoRequest, req: Request):
             ext = info.get("ext", "mp4" if is_video else "jpg")
             if ext == "none":
                 ext = "jpg"
+            
+            # Force mp4 ext if the url is mp4 but metadata says otherwise
+            if is_video and ".mp4" in direct_url:
+                 ext = "mp4"
 
             media_type = "video" if is_video else "image"
             title = info.get("title", "Media")
@@ -190,6 +216,7 @@ def extract_info(request: VideoRequest, req: Request):
                 "direct_url": direct_url,
                 "ext": ext,
                 "media_type": media_type,
+                "headers": http_headers  # Pass headers to client
             }
 
     except HTTPException:

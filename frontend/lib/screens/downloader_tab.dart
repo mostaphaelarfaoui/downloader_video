@@ -36,7 +36,9 @@ class _DownloaderTabState extends State<DownloaderTab> {
 
     // Connectivity check
     final connected = await ConnectivityService.hasInternet();
-    if (!connected && mounted) {
+    if (!mounted) return;
+
+    if (!connected) {
       TopMessageBar.show(
         context,
         "⚠️ No internet connection!",

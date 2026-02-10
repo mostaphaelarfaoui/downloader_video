@@ -50,7 +50,7 @@ class SocialBrowserTab extends StatelessWidget {
     return InkWell(
       onTap: () => _openBrowser(context, url, title),
       child: Card(
-        color: color.withOpacity(0.2),
+        color: color.withValues(alpha: 0.2),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -172,8 +172,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
     try {
       final result = await _controller.runJavaScriptReturningResult(script);
-      if (result != null &&
-          result.toString() != 'null' &&
+      if (result.toString() != 'null' &&
           result.toString() != '""') {
         return result.toString().replaceAll('"', '');
       }

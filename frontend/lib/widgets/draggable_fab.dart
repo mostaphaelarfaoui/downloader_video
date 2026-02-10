@@ -38,7 +38,7 @@ class _DraggableFabState extends State<DraggableFab> {
         },
         child: FloatingActionButton(
           mini: true,
-          backgroundColor: Colors.redAccent.withOpacity(0.9),
+          backgroundColor: Colors.redAccent.withValues(alpha: 0.9),
           onPressed: widget.onPressed,
           child: const Icon(Icons.download, size: 20, color: Colors.white),
         ),

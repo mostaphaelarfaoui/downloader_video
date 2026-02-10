@@ -11,7 +11,7 @@ class AppConfig {
   //              "http://localhost:8000"    (iOS simulator / desktop)
   // Production:  "https://your-app.onrender.com"
   static const String backendBaseUrl =
-      "https://naval-holly-sosta04-e7fdb863.koyeb.app";
+      "http://192.168.11.122:8000";
 
   /// Full extract endpoint.
   static String get extractUrl => "$backendBaseUrl/extract";
