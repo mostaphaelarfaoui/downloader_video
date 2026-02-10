@@ -83,7 +83,7 @@ class DownloadService {
         cancelToken: cancelToken,
         options: Options(
           headers: headers,
-          validateStatus: (status) => status != null && status < 500, // Accept redirects/403s potentially handled by dio
+          validateStatus: (status) => status != null && status >= 200 && status < 300,
         ),
         onReceiveProgress: (received, total) {
           if (total != -1) {

@@ -21,6 +21,14 @@ logging.basicConfig(
 logger = logging.getLogger("video_downloader")
 
 # --- App Init ---
+try:
+    import curl_cffi
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+    logger.info("✅ curl-cffi is installed and available.")
+except ImportError:
+    logger.warning("⚠️ curl-cffi is NOT installed. TikTok downloads may fail (403).")
+    ImpersonateTarget = None
+
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Video Downloader API", version="2.0.0")
 app.state.limiter = limiter
@@ -101,11 +109,14 @@ def extract_info(video_request: VideoRequest, request: Request):
     cookie_file = _get_cookie_file(video_request.cookies)
 
     ydl_opts = {
-        "quiet": True,
+        "quiet": False,  # Enable output for debugging
+        "verbose": True, # Enable verbose output
         "ignoreerrors": True,
         "noplaylist": True,
         "extract_flat": False,
         "skip_download": True,
+        "nocheckcertificate": True, # Disable SSL checks to avoid handshake timeouts
+        "impersonate": ImpersonateTarget(client="chrome"),
         "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -127,6 +138,8 @@ def extract_info(video_request: VideoRequest, request: Request):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            
+
 
             if info is None:
                 raise HTTPException(
@@ -206,6 +219,18 @@ def extract_info(video_request: VideoRequest, request: Request):
             # Sanitize title
             title = "".join(c for c in title if c.isalnum() or c in " _-").strip()[:100]
 
+            # Ensure headers are populated
+            if not http_headers:
+                http_headers = {}
+            
+            # Force User-Agent if missing
+            if "User-Agent" not in http_headers:
+                http_headers["User-Agent"] = ydl_opts.get("user_agent")
+            
+            # Force Referer for TikTok if missing (often required)
+            if "tiktok.com" in url.lower() and "Referer" not in http_headers:
+                http_headers["Referer"] = "https://www.tiktok.com/"
+
             logger.info(
                 "Extracted %s: title='%s', ext='%s'", media_type, title, ext
             )
@@ -222,7 +247,8 @@ def extract_info(video_request: VideoRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Extraction failed: %s", str(e))
+        import traceback
+        logger.error("Extraction failed: %s\n%s", str(e), traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         # Clean up temp cookie file
