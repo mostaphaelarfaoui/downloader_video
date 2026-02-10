@@ -212,7 +212,7 @@ def extract_info(request: VideoRequest, req: Request):
 
 @app.get("/get_file/{filename}")
 @limiter.limit("20/minute")
-def get_file(filename: str, req: Request):
+def get_file(filename: str, request: Request):
     """Serve a previously downloaded file. Includes path traversal protection."""
     # Path traversal protection
     safe_name = os.path.basename(filename)
