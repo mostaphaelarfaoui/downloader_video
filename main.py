@@ -1,213 +1,242 @@
 import os
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import yt_dlp
+import logging
+import base64
+import tempfile
+import uuid
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import yt_dlp
 
-app = FastAPI()
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("video_downloader")
 
+# --- App Init ---
+limiter = Limiter(key_func=get_remote_address)
+app = FastAPI(title="Video Downloader API", version="2.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# --- CORS ---
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
+# --- Legacy file serving (kept for backward compatibility) ---
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
 class VideoRequest(BaseModel):
     url: str
+    cookies: str | None = None  # Optional base64-encoded Netscape cookies
 
 
-def get_best_format_url(info: dict) -> str | None:
-    """
-    Extract the best quality direct URL from yt-dlp info.
-    Prioritizes formats with both video and audio combined.
-    """
-    formats = info.get('formats', [])
-    if not formats:
-        # If no formats list, try direct URL
-        return info.get('url')
-    
-    # First, try to find a format with both video and audio
-    best_combined = None
-    best_combined_quality = -1
-    
-    for fmt in formats:
-        has_video = fmt.get('vcodec') and fmt.get('vcodec') != 'none'
-        has_audio = fmt.get('acodec') and fmt.get('acodec') != 'none'
-        
-        if has_video and has_audio:
-            # Calculate quality score (higher is better)
-            height = fmt.get('height', 0) or 0
-            tbr = fmt.get('tbr', 0) or 0
-            quality = height * 1000 + tbr
-            
-            if quality > best_combined_quality:
-                best_combined_quality = quality
-                best_combined = fmt
-    
-    if best_combined:
-        return best_combined.get('url')
-    
-    # Fallback: get the best video-only format
-    best_video = None
-    best_video_quality = -1
-    
-    for fmt in formats:
-        has_video = fmt.get('vcodec') and fmt.get('vcodec') != 'none'
-        if has_video:
-            height = fmt.get('height', 0) or 0
-            tbr = fmt.get('tbr', 0) or 0
-            quality = height * 1000 + tbr
-            
-            if quality > best_video_quality:
-                best_video_quality = quality
-                best_video = fmt
-    
-    if best_video:
-        return best_video.get('url')
-    
-    # Ultimate fallback: return the 'url' field from info
-    return info.get('url')
+# =====================
+# Health Check Endpoints
+# =====================
 
-
-def get_thumbnail_url(info: dict) -> str | None:
-    """Extract the best thumbnail URL from info."""
-    # Direct thumbnail field
-    if info.get('thumbnail'):
-        return info.get('thumbnail')
-    
-    # Try thumbnails list (pick the last one, usually highest quality)
-    thumbnails = info.get('thumbnails', [])
-    if thumbnails:
-        return thumbnails[-1].get('url')
-    
-    return None
-
-
-def detect_source(url: str) -> str:
-    """Detect the source platform from URL."""
-    url_lower = url.lower()
-    if 'instagram' in url_lower:
-        return 'instagram'
-    elif 'tiktok' in url_lower:
-        return 'tiktok'
-    elif 'facebook' in url_lower or 'fb.watch' in url_lower:
-        return 'facebook'
-    elif 'youtube' in url_lower or 'youtu.be' in url_lower:
-        return 'youtube'
-    elif 'twitter' in url_lower or 'x.com' in url_lower:
-        return 'twitter'
-    else:
-        return 'unknown'
-
-
-@app.post("/extract")
-def extract_info(request: VideoRequest):
-    url = request.url.strip()
-
-    # Cookie file setup
-    cookie_file = "cookies.txt"
-    use_cookies = os.path.exists(cookie_file)
-
-    # yt-dlp options - CRUCIAL: download=False, we only extract info
-    ydl_opts = {
-        'quiet': True,
-        'ignoreerrors': True,
-        'noplaylist': True,
-        'extract_flat': False,
-        'skip_download': True,  # Ensure no download happens
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        # Format selection: prefer best combined (video+audio), fallback to best available
-        'format': 'best[ext=mp4]/best/bestvideo+bestaudio/bestvideo/best',
-    }
-
-    if use_cookies:
-        ydl_opts['cookiefile'] = cookie_file
-
-    try:
-        print(f"⏳ Extracting info for: {url}")
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extract info WITHOUT downloading
-            info = ydl.extract_info(url, download=False)
-            
-            if info is None:
-                raise HTTPException(
-                    status_code=400, 
-                    detail="Could not extract info. The URL may be invalid, private, or require login."
-                )
-
-            # Handle playlists/carousels - pick the first entry
-            if 'entries' in info:
-                print("📸 Detected Carousel/Playlist, picking first entry...")
-                try:
-                    entries = list(info['entries'])
-                    if not entries:
-                        raise HTTPException(status_code=400, detail="Empty playlist/carousel.")
-                    info = entries[0]
-                    if info is None:
-                        raise HTTPException(status_code=400, detail="First entry in playlist is empty.")
-                except (IndexError, TypeError):
-                    raise HTTPException(status_code=400, detail="Could not extract from playlist/carousel.")
-
-            # Determine media type
-            is_video = True
-            if info.get('vcodec') == 'none' or info.get('ext') in ['jpg', 'jpeg', 'png', 'webp', 'heic']:
-                is_video = False
-
-            # Get the direct URL
-            direct_url = get_best_format_url(info)
-            
-            if not direct_url:
-                raise HTTPException(
-                    status_code=400, 
-                    detail="Could not extract direct download URL. The media may be protected."
-                )
-
-            # Get metadata
-            title = info.get('title', 'Untitled Media')
-            if title:
-                title = title[:100]  # Limit title length
-            
-            thumbnail = get_thumbnail_url(info)
-            source = detect_source(url)
-            ext = info.get('ext', 'mp4')
-            media_type = "video" if is_video else "image"
-            
-            # Duration in seconds (if available)
-            duration = info.get('duration')
-            
-            # File size (if available, in bytes)
-            filesize = info.get('filesize') or info.get('filesize_approx')
-
-            print(f"✅ Extracted successfully: {title}")
-            print(f"   Direct URL: {direct_url[:80]}...")
-            
-            return {
-                "status": "success",
-                "direct_url": direct_url,
-                "title": title,
-                "thumbnail": thumbnail,
-                "source": source,
-                "ext": ext if ext and ext != 'none' else 'mp4',
-                "media_type": media_type,
-                "duration": duration,
-                "filesize": filesize,
-            }
-
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        print(f"🔥 Error: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "video-downloader-api", "version": "2.0.0"}
 
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint."""
-    return {"status": "ok", "message": "Server is running"}
+    return {"status": "healthy"}
 
+
+# =====================
+# Link Extraction (Core)
+# =====================
+
+def _get_cookie_file(request_cookies_b64: str | None) -> str | None:
+    """
+    Resolve cookie file path. Priority:
+      1. Per-request base64 cookies from client
+      2. INSTAGRAM_COOKIES env var (base64)
+      3. None (no cookies)
+    """
+    raw = request_cookies_b64 or os.getenv("INSTAGRAM_COOKIES")
+    if not raw:
+        return None
+
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, prefix="cookies_"
+        )
+        tmp.write(decoded)
+        tmp.close()
+        return tmp.name
+    except Exception as e:
+        logger.warning("Failed to decode cookies: %s", e)
+        return None
+
+
+@app.post("/extract")
+@limiter.limit("10/minute")
+def extract_info(request: VideoRequest, req: Request):
+    """
+    Extract direct media URL and metadata.
+    Returns JSON with direct_url for client-side downloading.
+    """
+    url = request.url.strip()
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Invalid URL. Must start with http(s).")
+
+    cookie_file = _get_cookie_file(request.cookies)
+
+    ydl_opts = {
+        "quiet": True,
+        "ignoreerrors": True,
+        "noplaylist": True,
+        "extract_flat": False,
+        "skip_download": True,
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
+
+    try:
+        logger.info("Analyzing URL: %s", url)
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+            if info is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract info. The URL may be invalid or require login.",
+                )
+
+            # Handle carousels / playlists — pick first entry
+            if "entries" in info:
+                logger.info("Detected carousel/playlist, picking first entry.")
+                try:
+                    info = list(info["entries"])[0]
+                except (IndexError, StopIteration):
+                    raise HTTPException(status_code=400, detail="Empty playlist/carousel.")
+
+            # Determine media type
+            is_video = True
+            if info.get("vcodec") == "none" or info.get("ext") in [
+                "jpg", "jpeg", "png", "webp", "heic",
+            ]:
+                is_video = False
+
+            # Get the best direct URL
+            direct_url = info.get("url")
+
+            # For videos, try to get the best format URL
+            if is_video and not direct_url:
+                formats = info.get("formats", [])
+                if formats:
+                    # Pick best quality with both video+audio, fallback to last
+                    best = None
+                    for f in formats:
+                        if f.get("vcodec") != "none" and f.get("acodec") != "none":
+                            best = f
+                    if best is None:
+                        best = formats[-1]
+                    direct_url = best.get("url")
+
+            # For images, try thumbnail as fallback
+            if not is_video and not direct_url:
+                thumbnails = info.get("thumbnails", [])
+                if thumbnails:
+                    direct_url = thumbnails[-1].get("url")
+
+            if not direct_url:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not find a direct media URL for this content.",
+                )
+
+            ext = info.get("ext", "mp4" if is_video else "jpg")
+            if ext == "none":
+                ext = "jpg"
+
+            media_type = "video" if is_video else "image"
+            title = info.get("title", "Media")
+            # Sanitize title
+            title = "".join(c for c in title if c.isalnum() or c in " _-").strip()[:100]
+
+            logger.info(
+                "Extracted %s: title='%s', ext='%s'", media_type, title, ext
+            )
+
+            return {
+                "status": "success",
+                "title": title or "Media",
+                "direct_url": direct_url,
+                "ext": ext,
+                "media_type": media_type,
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Extraction failed: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        # Clean up temp cookie file
+        if cookie_file and os.path.exists(cookie_file):
+            try:
+                os.remove(cookie_file)
+            except OSError:
+                pass
+
+
+# =====================
+# Legacy File Serving (backward compat)
+# =====================
+
+@app.get("/get_file/{filename}")
+@limiter.limit("20/minute")
+def get_file(filename: str, req: Request):
+    """Serve a previously downloaded file. Includes path traversal protection."""
+    # Path traversal protection
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(DOWNLOAD_DIR, safe_name)
+    real_path = os.path.realpath(file_path)
+    real_dir = os.path.realpath(DOWNLOAD_DIR)
+
+    if not real_path.startswith(real_dir):
+        logger.warning("Path traversal attempt blocked: %s", filename)
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    if not os.path.exists(real_path):
+        raise HTTPException(status_code=404, detail="File not found or expired.")
+
+    return FileResponse(real_path)
+
+
+# =====================
+# Entry Point
+# =====================
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    port = int(os.getenv("PORT", "8000"))
+    logger.info("Starting server on port %d", port)
+    uvicorn.run(app, host="0.0.0.0", port=port)

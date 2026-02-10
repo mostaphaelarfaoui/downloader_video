@@ -2,7 +2,7 @@
 # Python / Backend
 # =========================
 
-# ⚠️ أهم سطر: تجاهل البيئة الافتراضية (الفيروسات)
+# Virtual environments
 venv/
 backend/venv/
 env/
@@ -13,19 +13,22 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Downloaded media
+# Downloaded media (temp files)
 downloads/
 backend/downloads/
 
-# Binary files (Safety net)
+# Binary files
 *.exe
 *.dll
 *.so
 *.dylib
 
-# Environment files
+# Environment & Secrets
 .env
+*.env
 backend/.env
+cookies.txt
+*.cookies
 
 # =========================
 # Flutter Frontend
@@ -53,3 +56,6 @@ frontend/ios/Flutter/flutter_export_environment.sh
 .vscode/
 .idea/
 *.iml
+*.swp
+*.swo
+*~

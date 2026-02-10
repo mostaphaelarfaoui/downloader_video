@@ -1,7 +1,7 @@
 name: video_downloader_app
 description: A video downloader frontend using Flutter.
 publish_to: 'none'
-version: 1.0.0+1
+version: 2.0.0+2
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -9,19 +9,27 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  webview_flutter: ^4.4.2
-  flutter_riverpod: ^2.4.0
+
+  # Core networking
   dio: ^5.3.0
-  path_provider: ^2.1.1
-  permission_handler: ^11.0.0
-  gal: ^2.2.0
-  # NEW PACKAGES:
+
+  # WebView for in-app browsing
+  webview_flutter: ^4.4.2
+
+  # Video playback
   video_player: ^2.8.1
   chewie: ^1.7.1
-  video_thumbnail: ^0.5.3
-  flutter_local_notifications: ^18.0.1  # Upgraded to fix Android bigLargeIcon ambiguity
-  intl: ^0.19.0
 
+  # Local notifications (download progress)
+  flutter_local_notifications: ^18.0.1
+
+  # File system
+  path_provider: ^2.1.1
+
+  # Permissions (Android scoped storage)
+  permission_handler: ^11.0.0
+
+  # Icons
   cupertino_icons: ^1.0.2
 
 dev_dependencies:
