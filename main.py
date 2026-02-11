@@ -122,9 +122,18 @@ def extract_info(video_request: VideoRequest, request: Request):
                 "player_skip": ["web_safari", "web_creator"],
             }
         },
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-Dest": "document",
+            "Upgrade-Insecure-Requests": "1",
+        },
     }
 
-    # Only use impersonation (curl_cffi) for TikTok as it causes timeouts on other sites
+    # Only use impersonation (curl_cffi) for TikTok
     if "tiktok.com" in url.lower() and ImpersonateTarget:
         ydl_opts["impersonate"] = ImpersonateTarget(client="chrome")
 
