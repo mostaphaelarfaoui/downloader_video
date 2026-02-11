@@ -97,7 +97,7 @@ class DownloadService {
       );
 
       // ── Step 4: Success ──────────────────────────────────────
-      NotificationService.showCompletion(notificationId, fileName);
+      NotificationService.showCompletion(notificationId, fileName, savePath);
       if (context.mounted) {
         TopMessageBar.show(
           context,

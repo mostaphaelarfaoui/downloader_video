@@ -1,4 +1,5 @@
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:open_file/open_file.dart';
 
 /// Handles all local push-notification logic (download progress & completion).
 class NotificationService {
@@ -11,7 +12,14 @@ class NotificationService {
   static Future<void> init() async {
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     const settings = InitializationSettings(android: android);
-    await _plugin.initialize(settings);
+    await _plugin.initialize(
+      settings,
+      onDidReceiveNotificationResponse: (details) {
+        if (details.payload != null) {
+          OpenFile.open(details.payload);
+        }
+      },
+    );
 
     // Request notification permission on Android 13+.
     await _plugin
@@ -23,7 +31,7 @@ class NotificationService {
   /// Show / update a progress notification.
   static Future<void> showProgress(int id, int progress) async {
     final android = AndroidNotificationDetails(
-      'download_channel',
+      'video_downloads_v3', // Changed ID to force update
       'Downloads',
       channelDescription: 'Download progress',
       importance: Importance.low,
@@ -32,6 +40,7 @@ class NotificationService {
       showProgress: true,
       maxProgress: 100,
       progress: progress,
+      ongoing: true, // Prevent dismissal while downloading
     );
     await _plugin.show(
       id,
@@ -42,18 +51,26 @@ class NotificationService {
   }
 
   /// Show a completion notification.
-  static Future<void> showCompletion(int id, String title) async {
+  static Future<void> showCompletion(int id, String title, String filePath) async {
+    // Explicitly cancel the progress notification first to prevent "stuck" bars
+    await _plugin.cancel(id);
+
     const android = AndroidNotificationDetails(
-      'download_channel',
+      'video_downloads_v3',
       'Downloads',
+      channelDescription: 'Download progress',
       importance: Importance.high,
       priority: Priority.high,
+      ongoing: false, // Allow dismissal
+      autoCancel: true, // Dismiss on tap
+      showProgress: false,
     );
     await _plugin.show(
       id,
       'Download Complete',
-      'Saved: $title',
+      'Tap to open: $title',
       const NotificationDetails(android: android),
+      payload: filePath,
     );
   }
 }

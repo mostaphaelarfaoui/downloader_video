@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'config/app_config.dart';
 import 'screens/downloader_tab.dart';
 import 'screens/gallery_tab.dart';
-import 'screens/settings_screen.dart';
+
 import 'screens/social_browser_tab.dart';
 import 'services/notification_service.dart';
 import 'services/permission_service.dart';
@@ -84,16 +84,7 @@ class _MainScreenState extends State<MainScreen> {
         ],
       ),
 
-      // --- Settings gear in a global FAB position ---
-      floatingActionButton: FloatingActionButton.small(
-        heroTag: "settings_fab",
-        onPressed: () => Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => const SettingsScreen()),
-        ),
-        child: const Icon(Icons.settings),
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.miniEndTop,
+
     );
   }
 }
