@@ -11,8 +11,8 @@ class AppConfig {
   //              "http://localhost:8000"    (iOS simulator / desktop)
   // Production:  "https://your-app.onrender.com"
   static const String backendBaseUrl =
-      "https://video-downloader-api-ezrp.onrender.com";
-
+      "http://192.168.11.126:8000";
+ 
   /// Full extract endpoint.
   static String get extractUrl => "$backendBaseUrl/extract";
 

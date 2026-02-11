@@ -2,9 +2,8 @@ import os
 import logging
 import base64
 import tempfile
-import uuid
+
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -42,11 +41,6 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
-# --- Legacy file serving (kept for backward compatibility) ---
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
 
 class VideoRequest(BaseModel):
     url: str
@@ -116,7 +110,7 @@ def extract_info(video_request: VideoRequest, request: Request):
         "extract_flat": False,
         "skip_download": True,
         "nocheckcertificate": True, # Disable SSL checks to avoid handshake timeouts
-        "impersonate": ImpersonateTarget(client="chrome"),
+
         "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -129,6 +123,10 @@ def extract_info(video_request: VideoRequest, request: Request):
             }
         },
     }
+
+    # Only use impersonation (curl_cffi) for TikTok as it causes timeouts on other sites
+    if "tiktok.com" in url.lower() and ImpersonateTarget:
+        ydl_opts["impersonate"] = ImpersonateTarget(client="chrome")
 
     if cookie_file:
         ydl_opts["cookiefile"] = cookie_file
@@ -263,24 +261,7 @@ def extract_info(video_request: VideoRequest, request: Request):
 # Legacy File Serving (backward compat)
 # =====================
 
-@app.get("/get_file/{filename}")
-@limiter.limit("20/minute")
-def get_file(filename: str, request: Request):
-    """Serve a previously downloaded file. Includes path traversal protection."""
-    # Path traversal protection
-    safe_name = os.path.basename(filename)
-    file_path = os.path.join(DOWNLOAD_DIR, safe_name)
-    real_path = os.path.realpath(file_path)
-    real_dir = os.path.realpath(DOWNLOAD_DIR)
 
-    if not real_path.startswith(real_dir):
-        logger.warning("Path traversal attempt blocked: %s", filename)
-        raise HTTPException(status_code=403, detail="Access denied.")
-
-    if not os.path.exists(real_path):
-        raise HTTPException(status_code=404, detail="File not found or expired.")
-
-    return FileResponse(real_path)
 
 
 # =====================
