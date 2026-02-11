@@ -43,26 +43,32 @@ class StorageService {
     return dir;
   }
 
-  /// Atomically reserves and returns the next sequential video number.
-  static Future<int> getAndReserveNextVideoNumber() async {
+  /// Scans existing files to find the next available video number.
+  /// Matches pattern: [Prefix]_Video_[Number].[ext]
+  static Future<int> getNextVideoNumber() async {
     final dir = await getAppStorageDir();
-    final counterFile =
-        File('${dir.path}/${AppConfig.videoCounterFileName}');
+    int maxId = 0;
 
-    int current = 1;
     try {
-      if (await counterFile.exists()) {
-        final content = await counterFile.readAsString();
-        final parsed = int.tryParse(content.trim());
-        if (parsed != null && parsed > 0) current = parsed;
+      final List<FileSystemEntity> files = dir.listSync();
+      final regExp = RegExp(r'_Video_(\d+)\.');
+
+      for (var file in files) {
+        if (file is File) {
+          final filename = file.uri.pathSegments.last;
+          final match = regExp.firstMatch(filename);
+          if (match != null) {
+            final id = int.tryParse(match.group(1) ?? '0') ?? 0;
+            if (id > maxId) maxId = id;
+          }
+        }
       }
-    } catch (_) {}
+    } catch (e) {
+      // If error occurs (e.g. permission), default to timestamp to avoid overwrite
+      return DateTime.now().millisecondsSinceEpoch;
+    }
 
-    try {
-      await counterFile.writeAsString('${current + 1}');
-    } catch (_) {}
-
-    return current;
+    return maxId + 1;
   }
 
   /// Lists media files (videos + images) in the app storage directory.

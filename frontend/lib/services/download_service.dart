@@ -49,7 +49,8 @@ class DownloadService {
       final directUrl = data['direct_url'] as String;
       final ext = data['ext'] as String;
       final mediaType = data['media_type'] as String;
-      
+      String title = data['title'] as String? ?? "Video";
+
       // Get headers if available (User-Agent, Cookies, etc.)
       Map<String, dynamic>? headers;
       if (data['headers'] != null) {
@@ -59,9 +60,22 @@ class DownloadService {
       // ── Step 2: Resolve local save path ───────────────────────
       final appDir = await StorageService.getAppStorageDir();
       String fileName;
+
       if (mediaType == "video") {
-        final n = await StorageService.getAndReserveNextVideoNumber();
-        fileName = "Video $n.$ext";
+        String prefix = "Video";
+        if (url.contains("facebook.com") || url.contains("fb.watch")) {
+          prefix = "FB";
+        } else if (url.contains("instagram.com")) {
+          prefix = "iN";
+        } else if (url.contains("tiktok.com")) {
+          prefix = "TK";
+        } else if (url.contains("youtube.com") || url.contains("youtu.be")) {
+          prefix = "YT";
+        }
+        
+        // Use robust directory scanning to get the next number
+        final n = await StorageService.getNextVideoNumber();
+        fileName = "${prefix}_Video_$n.$ext";
       } else {
         fileName = "Image_${DateTime.now().millisecondsSinceEpoch}.$ext";
       }
