@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../services/cookie_service.dart';
 import '../services/download_service.dart';
 import '../widgets/draggable_fab.dart';
 import '../widgets/top_message_bar.dart';
@@ -223,10 +224,25 @@ class _WebViewScreenState extends State<WebViewScreen> {
     }
 
     debugPrint("🎯 Sending to backend: $target");
+
+    // Extract cookies from WebView for authenticated downloads (e.g. stories)
+    String? cookies;
+    try {
+      cookies = await CookieService.extractCookiesBase64(_controller);
+      if (cookies != null) {
+        debugPrint("🍪 Cookies extracted for download");
+      } else {
+        debugPrint("🍪 Cookie extraction returned null");
+      }
+    } catch (e) {
+      debugPrint("🍪 Cookie extraction FAILED: $e");
+    }
+
     if (mounted) {
       DownloadService.startDownload(
         context,
         target,
+        cookies: cookies,
         onComplete: widget.onDownloadComplete,
       );
     }

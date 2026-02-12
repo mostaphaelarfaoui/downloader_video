@@ -100,7 +100,9 @@ def extract_info(video_request: VideoRequest, request: Request):
     if not url.startswith("http"):
         raise HTTPException(status_code=400, detail="Invalid URL. Must start with http(s).")
 
+    logger.info("Cookies received: %s", "YES" if video_request.cookies else "NO")
     cookie_file = _get_cookie_file(video_request.cookies)
+    logger.info("Cookie file path: %s", cookie_file)
 
     ydl_opts = {
         "quiet": False,  # Enable output for debugging

@@ -1,0 +1,14 @@
+name: Scheduled Render Update
+on:
+  schedule:
+    # سيتم التشغيل مرتين في الأسبوع (الاثنين والخميس مع منتصف الليل)
+    - cron: '0 0 * * 1,4' 
+  workflow_dispatch: # يتيح لك تشغيل التحديث يدوياً من GitHub إذا أردت
+
+jobs:
+  update-render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render Deploy Hook
+        run: |
+          curl -X POST ${{ secrets.RENDER_DEPLOY_HOOK }}

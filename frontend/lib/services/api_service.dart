@@ -18,11 +18,20 @@ class ApiService {
 
   /// Calls the backend to extract the direct media URL and metadata.
   ///
+  /// [cookies] is an optional base64-encoded Netscape cookie string
+  /// used for authenticated content (e.g. Instagram Stories).
+  ///
   /// Throws [DioException] on network/server errors.
-  static Future<Map<String, dynamic>> extractMedia(String url) async {
+  static Future<Map<String, dynamic>> extractMedia(
+    String url, {
+    String? cookies,
+  }) async {
+    final body = <String, dynamic>{"url": url};
+    if (cookies != null) body["cookies"] = cookies;
+
     final response = await _dio.post(
       AppConfig.extractUrl,
-      data: {"url": url},
+      data: body,
     );
 
     final data = response.data;

@@ -32,6 +32,7 @@ dependencies:
   # Icons
   cupertino_icons: ^1.0.2
   open_file: ^3.5.11
+  flutter_inappwebview: ^6.1.5
 
 dev_dependencies:
   flutter_test:

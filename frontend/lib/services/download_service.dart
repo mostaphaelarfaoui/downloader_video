@@ -29,6 +29,7 @@ class DownloadService {
   static Future<void> startDownload(
     BuildContext context,
     String url, {
+    String? cookies,
     void Function(String status)? onStatusChange,
     void Function(int progress)? onProgress,
     VoidCallback? onComplete,
@@ -44,7 +45,7 @@ class DownloadService {
     try {
       // ── Step 1: Extract direct URL from backend ───────────────
       onStatusChange?.call("Contacting server…");
-      final data = await ApiService.extractMedia(url);
+      final data = await ApiService.extractMedia(url, cookies: cookies);
 
       final directUrl = data['direct_url'] as String;
       final ext = data['ext'] as String;
