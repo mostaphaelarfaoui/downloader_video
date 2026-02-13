@@ -48,6 +48,8 @@ class DownloadService {
       final data = await ApiService.extractMedia(url, cookies: cookies);
 
       final directUrl = data['direct_url'] as String;
+      final mediaUrls = (data['media_urls'] as List?)?.map((e) => e.toString()).toList() ?? [directUrl];
+      
       final ext = data['ext'] as String;
       final mediaType = data['media_type'] as String;
       String title = data['title'] as String? ?? "Video";
@@ -57,66 +59,84 @@ class DownloadService {
       if (data['headers'] != null) {
         headers = Map<String, dynamic>.from(data['headers']);
       }
-
-      // ── Step 2: Resolve local save path ───────────────────────
+      
       final appDir = await StorageService.getAppStorageDir();
-      String fileName;
+      int totalItems = mediaUrls.length;
+      
+      for (int i = 0; i < totalItems; i++) {
+        final currentUrl = mediaUrls[i];
+        final isMultiple = totalItems > 1;
+        
+        // ── Step 2: Resolve local save path ───────────────────────
+        String fileName;
 
-      if (mediaType == "video") {
-        String prefix = "Video";
-        if (url.contains("facebook.com") || url.contains("fb.watch")) {
-          prefix = "FB";
-        } else if (url.contains("instagram.com")) {
-          prefix = "iN";
-        } else if (url.contains("tiktok.com")) {
-          prefix = "TK";
-        } else if (url.contains("youtube.com") || url.contains("youtu.be")) {
-          prefix = "YT";
+        if (mediaType == "video") {
+          String prefix = "Video";
+          if (url.contains("facebook.com") || url.contains("fb.watch")) {
+            prefix = "FB";
+          } else if (url.contains("instagram.com")) {
+            prefix = "iN";
+          } else if (url.contains("tiktok.com")) {
+            prefix = "TK";
+          } else if (url.contains("youtube.com") || url.contains("youtu.be")) {
+            prefix = "YT";
+          }
+          
+          // Use robust directory scanning to get the next number
+          final n = await StorageService.getNextVideoNumber();
+          fileName = "${prefix}_Video_$n.$ext";
+        } else {
+          // For images, append index if multiple
+          String suffix = isMultiple ? "_${i + 1}" : "";
+          fileName = "Image_${DateTime.now().millisecondsSinceEpoch}$suffix.$ext";
         }
         
-        // Use robust directory scanning to get the next number
-        final n = await StorageService.getNextVideoNumber();
-        fileName = "${prefix}_Video_$n.$ext";
-      } else {
-        fileName = "Image_${DateTime.now().millisecondsSinceEpoch}.$ext";
-      }
-      final savePath = "${appDir.path}/$fileName";
+        final savePath = "${appDir.path}/$fileName";
 
-      // ── Step 3: Download directly from source (client-side) ──
-      if (context.mounted) {
-        TopMessageBar.show(
-          context,
-          "⬇️ Downloading $mediaType…",
-          duration: const Duration(seconds: 2),
-        );
-      }
-      onStatusChange?.call("Downloading $mediaType…");
+        // ── Step 3: Download directly from source (client-side) ──
+        if (context.mounted) {
+           String msg = isMultiple 
+              ? "⬇️ Downloading ${i + 1}/$totalItems…" 
+              : "⬇️ Downloading $mediaType…";
+           
+           TopMessageBar.show(
+              context,
+              msg,
+              duration: const Duration(seconds: 2),
+           );
+        }
+        onStatusChange?.call(isMultiple ? "Downloading ${i + 1}/$totalItems…" : "Downloading $mediaType…");
 
-      await _dio.download(
-        directUrl,
-        savePath,
-        cancelToken: cancelToken,
-        options: Options(
-          headers: headers,
-          validateStatus: (status) => status != null && status >= 200 && status < 300,
-        ),
-        onReceiveProgress: (received, total) {
-          if (total != -1) {
-            final percent = ((received / total) * 100).toInt();
-            if (percent % 5 == 0) {
-              NotificationService.showProgress(notificationId, percent);
+        await _dio.download(
+          currentUrl,
+          savePath,
+          cancelToken: cancelToken,
+          options: Options(
+            headers: headers,
+            validateStatus: (status) => status != null && status >= 200 && status < 300,
+          ),
+          onReceiveProgress: (received, total) {
+            if (total != -1) {
+              final percent = ((received / total) * 100).toInt();
+              // Only report progress for single items or overall? 
+              // Simple progress for current item
+              if (percent % 5 == 0) {
+                 NotificationService.showProgress(notificationId + i, percent); // Distinct IDs for multiple?
+              }
+              onProgress?.call(percent);
             }
-            onProgress?.call(percent);
-          }
-        },
-      );
+          },
+        );
 
-      // ── Step 4: Success ──────────────────────────────────────
-      NotificationService.showCompletion(notificationId, fileName, savePath);
+        // ── Step 4: Success per item ──────────────────────────────
+        // Use unique ID for each notification if multiple
+        NotificationService.showCompletion(notificationId + i, fileName, savePath);
+      }
+
       if (context.mounted) {
         TopMessageBar.show(
           context,
-          "✅ Download Complete!",
+          totalItems > 1 ? "✅ All $totalItems items downloaded!" : "✅ Download Complete!",
           backgroundColor: Colors.green,
           duration: const Duration(seconds: 2),
         );
@@ -124,6 +144,7 @@ class DownloadService {
       onProgress?.call(100);
       onStatusChange?.call("Completed");
       onComplete?.call();
+
     } catch (e) {
       String errorMessage = "Download Failed";
 

@@ -52,6 +52,9 @@ class ApiService {
     final ext = data['ext']?.toString();
     final mediaType = data['media_type']?.toString() ?? 'video';
     final title = data['title']?.toString() ?? 'Media';
+    
+    // Parse list of URLs for carousels
+    final mediaUrls = (data['media_urls'] as List?)?.map((e) => e.toString()).toList();
 
     if (directUrl == null ||
         ext == null ||
@@ -62,6 +65,7 @@ class ApiService {
 
     return {
       'direct_url': directUrl,
+      'media_urls': mediaUrls,
       'ext': ext,
       'media_type': mediaType,
       'title': title,
