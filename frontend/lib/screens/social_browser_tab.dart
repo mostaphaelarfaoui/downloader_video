@@ -303,9 +303,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
               return NavigationActionPolicy.ALLOW;
             },
           ),
-          SafeArea(
-            child: DraggableFab(onPressed: _handleDownload),
-          ),
+          DraggableFab(onPressed: _handleDownload),
         ],
       ),
     );

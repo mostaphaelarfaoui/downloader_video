@@ -27,36 +27,40 @@ class _DraggableFabState extends State<DraggableFab> {
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
-    const double btnSize = 56;
+    const double btnSize = 60;
     final double maxX = size.width - btnSize;
-    final double maxY = size.height - btnSize; // Removed arbitrary -80 to allow full usage
-
-    // Clamp position to keep on screen
-    position = Offset(
-      position.dx.clamp(0.0, maxX),
-      position.dy.clamp(0.0, maxY),
-    );
+    final double maxY = size.height - btnSize;
 
     return Positioned(
-      left: position.dx,
-      top: position.dy,
+      left: position.dx.clamp(0.0, maxX),
+      top: position.dy.clamp(0.0, maxY),
       child: GestureDetector(
         onPanUpdate: (details) {
           setState(() {
-            position = Offset(
-              (position.dx + details.delta.dx).clamp(0.0, maxX),
-              (position.dy + details.delta.dy).clamp(0.0, maxY),
-            );
+            position += details.delta;
           });
         },
-        child: FloatingActionButton(
-          mini: false, // Make it standard size for better visibility
-          backgroundColor: Colors.redAccent,
-          shape: const CircleBorder(
-            side: BorderSide(color: Colors.white, width: 2), // High contrast border
+        child: Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.3),
+                blurRadius: 8,
+                spreadRadius: 2,
+              )
+            ],
           ),
-          onPressed: widget.onPressed,
-          child: const Icon(Icons.download, size: 28, color: Colors.white),
+          child: FloatingActionButton(
+            heroTag: "draggable_download_fab",
+            backgroundColor: Colors.redAccent,
+            elevation: 0, 
+            shape: const CircleBorder(
+              side: BorderSide(color: Colors.white, width: 2),
+            ),
+            onPressed: widget.onPressed,
+            child: const Icon(Icons.download, size: 30, color: Colors.white),
+          ),
         ),
       ),
     );
