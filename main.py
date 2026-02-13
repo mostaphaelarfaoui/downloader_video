@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import base64
 import tempfile
@@ -10,6 +11,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import yt_dlp
+import requests as http_requests
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -89,6 +91,104 @@ def _get_cookie_file(request_cookies_b64: str | None) -> str | None:
         return None
 
 
+def _parse_cookies_from_file(cookie_file: str | None) -> dict:
+    """Parse Netscape cookie file into a dict for requests."""
+    cookies = {}
+    if not cookie_file:
+        return cookies
+    try:
+        with open(cookie_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('#') or not line:
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 7:
+                    cookies[parts[5]] = parts[6]
+    except Exception:
+        pass
+    return cookies
+
+
+def _extract_instagram_image(url: str, cookie_file: str | None) -> dict | None:
+    """
+    Fallback: Extract image URL directly from Instagram API when yt-dlp fails.
+    Uses Instagram's private API with user cookies.
+    """
+    # Extract shortcode from URL
+    match = re.search(r'/p/([^/?]+)', url) or re.search(r'/reel/([^/?]+)', url)
+    if not match:
+        return None
+
+    shortcode = match.group(1)
+    cookies = _parse_cookies_from_file(cookie_file)
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'X-IG-App-ID': '936619743392459',
+        'X-Requested-With': 'XMLHttpRequest',
+    }
+
+    # Try Instagram's GraphQL API with cookies (works for private posts too)
+    try:
+        api_url = f'https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis'
+        logger.info("Instagram Image Fallback: Trying %s", api_url)
+        resp = http_requests.get(api_url, headers=headers, cookies=cookies, timeout=15)
+        logger.info("Instagram Image Fallback: Status %s", resp.status_code)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get('items', [])
+            if items:
+                item = items[0]
+                # Check for carousel_media (multi-image post)
+                carousel = item.get('carousel_media', [])
+                if carousel:
+                    media = carousel[0]  # First image
+                else:
+                    media = item
+
+                # Get image URL from image_versions2
+                candidates = media.get('image_versions2', {}).get('candidates', [])
+                if candidates:
+                    # Sort by width (largest first)
+                    candidates.sort(key=lambda x: x.get('width', 0), reverse=True)
+                    image_url = candidates[0].get('url')
+                    title = item.get('caption', {}).get('text', 'Instagram Image') if item.get('caption') else 'Instagram Image'
+                    title = "".join(c for c in title if c.isalnum() or c in " _-").strip()[:100]
+                    logger.info("Instagram Image Fallback: Found image URL!")
+                    return {
+                        'direct_url': image_url,
+                        'title': title,
+                        'ext': 'jpg',
+                        'is_video': False,
+                    }
+    except Exception as e:
+        logger.warning("Instagram GraphQL API failed: %s", e)
+
+    # Fallback: Try OEmbed API (public posts only, no auth needed)
+    try:
+        oembed_url = f'https://www.instagram.com/api/v1/oembed/?url=https://www.instagram.com/p/{shortcode}/'
+        logger.info("Instagram Image Fallback: Trying OEmbed %s", oembed_url)
+        resp = http_requests.get(oembed_url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            thumbnail = data.get('thumbnail_url')
+            if thumbnail:
+                title = data.get('title', 'Instagram Image')
+                title = "".join(c for c in title if c.isalnum() or c in " _-").strip()[:100]
+                logger.info("Instagram Image Fallback: Found thumbnail via OEmbed!")
+                return {
+                    'direct_url': thumbnail,
+                    'title': title,
+                    'ext': 'jpg',
+                    'is_video': False,
+                }
+    except Exception as e:
+        logger.warning("Instagram OEmbed API failed: %s", e)
+
+    return None
+
 @app.post("/extract")
 @limiter.limit("10/minute")
 def extract_info(video_request: VideoRequest, request: Request):
@@ -108,10 +208,13 @@ def extract_info(video_request: VideoRequest, request: Request):
         "quiet": False,  # Enable output for debugging
         "verbose": True, # Enable verbose output
         "ignoreerrors": True,
-        "noplaylist": True,
+        "noplaylist": "instagram.com" not in url and "tiktok.com" not in url, 
         "extract_flat": False,
         "skip_download": True,
         "nocheckcertificate": True, # Disable SSL checks to avoid handshake timeouts
+        # Allow selecting 'none' video formats (images)
+        "writethumbnail": True,
+        "ignore_no_formats_error": True, # Key fix for Instagram images
 
         "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -146,8 +249,26 @@ def extract_info(video_request: VideoRequest, request: Request):
         logger.info("Analyzing URL: %s", url)
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
+            try:
+                info = ydl.extract_info(url, download=False)
+            except yt_dlp.utils.DownloadError:
+                info = None
+
+            logger.info("Extraction Result: %s", "None" if info is None else f"Found info with keys: {list(info.keys()) if info else 'None'}")
+
+            if info is None:
+                logger.warning("Extraction failed, retrying with distinct fallback options for Image...")
+                # Create fresh options for fallback
+                fallback_opts = ydl_opts.copy()
+                fallback_opts.pop('format', None) # Remove format constraint
+                fallback_opts['extract_flat'] = True # Get metadata only
+                
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fallback:
+                    try:
+                        info = ydl_fallback.extract_info(url, download=False)
+                    except Exception as e:
+                        logger.error("Fallback extraction also failed: %s", e)
+                        raise HTTPException(status_code=400, detail="Could not extract media (Video or Image).")
 
 
             if info is None:
@@ -171,45 +292,56 @@ def extract_info(video_request: VideoRequest, request: Request):
             ]:
                 is_video = False
 
+            # Debug: Log all possible URL sources
+            logger.info("DEBUG url=%s", info.get("url"))
+            logger.info("DEBUG thumbnail=%s", info.get("thumbnail"))
+            logger.info("DEBUG thumbnails=%s", info.get("thumbnails"))
+            logger.info("DEBUG formats count=%s", len(info.get("formats", [])))
+            formats = info.get("formats", [])
+            for i, f in enumerate(formats):
+                logger.info("DEBUG format[%d]: url=%s vcodec=%s ext=%s", i, f.get("url", "")[:80] if f.get("url") else "None", f.get("vcodec"), f.get("ext"))
+
             # Get the best direct URL
             direct_url = info.get("url")
             http_headers = info.get("http_headers", {})
 
-            # For videos, try to get the best format URL (Prioritize MP4 with Audio+Video)
-            if is_video and not direct_url:
-                formats = info.get("formats", [])
-                if formats:
-                    best = None
-                    # First pass: Look for mp4 with both audio and video
-                    for f in formats:
-                        if (f.get("vcodec") != "none" and 
-                            f.get("acodec") != "none" and 
-                            f.get("ext") == "mp4"):
-                            best = f
-                            # Keep looking for a better quality one (formats are usually sorted)
-                    
-                    # Second pass: If no mp4, look for any container with both
-                    if best is None:
-                        for f in formats:
-                            if f.get("vcodec") != "none" and f.get("acodec") != "none":
-                                best = f
-                    
-                    # Fallback
-                    if best is None:
-                        best = formats[-1]
-                        
-                    direct_url = best.get("url")
-                    # Update headers if specific format has them
-                    if best.get("http_headers"):
-                        http_headers = best.get("http_headers")
+            # If no URL selected by yt-dlp, find it manually from formats
+            if not direct_url:
+                 if formats:
+                     direct_url = formats[-1].get("url")
+                     if formats[-1].get("http_headers"):
+                         http_headers = formats[-1].get("http_headers")
 
-            # For images, try thumbnail as fallback
-            if not is_video and not direct_url:
+            # Fallback: thumbnails list
+            if not direct_url:
                 thumbnails = info.get("thumbnails", [])
                 if thumbnails:
                     direct_url = thumbnails[-1].get("url")
+                    is_video = False
+
+            # Fallback: thumbnail (singular key)
+            if not direct_url:
+                thumbnail = info.get("thumbnail")
+                if thumbnail:
+                    direct_url = thumbnail
+                    is_video = False
+
+            # Instagram image fallback: use direct API when yt-dlp fails
+            if not direct_url and "instagram.com" in url:
+                logger.info("Trying Instagram Image API fallback...")
+                ig_result = _extract_instagram_image(url, cookie_file)
+                if ig_result:
+                    return {
+                        "status": "success",
+                        "title": ig_result['title'] or "Media",
+                        "direct_url": ig_result['direct_url'],
+                        "ext": ig_result['ext'],
+                        "media_type": "image",
+                        "headers": http_headers,
+                    }
 
             if not direct_url:
+                logger.error("No direct URL found. Full info dump: %s", {k: v for k, v in info.items() if k not in ('formats', 'http_headers', 'requested_subtitles')})
                 raise HTTPException(
                     status_code=400,
                     detail="Could not find a direct media URL for this content.",

@@ -1,7 +1,7 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
-import '../services/cookie_service.dart';
 import '../services/download_service.dart';
 import '../widgets/draggable_fab.dart';
 import '../widgets/top_message_bar.dart';
@@ -88,41 +88,19 @@ class WebViewScreen extends StatefulWidget {
 }
 
 class _WebViewScreenState extends State<WebViewScreen> {
-  late final WebViewController _controller;
+  InAppWebViewController? _controller;
+  String _currentUrl = "";
 
   @override
   void initState() {
     super.initState();
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: (url) => debugPrint("Page Load: $url"),
-          onNavigationRequest: (request) {
-            final url = request.url.toLowerCase();
-
-            // Block deep-link / store redirects
-            if (url.contains('onelink.me') || url.contains('snssdk')) {
-              return NavigationDecision.prevent;
-            }
-            if (url.startsWith('intent://') ||
-                url.startsWith('market://') ||
-                url.contains('play.google.com') ||
-                url.contains('itunes.apple.com')) {
-              return NavigationDecision.prevent;
-            }
-            if (!url.startsWith('http')) {
-              return NavigationDecision.prevent;
-            }
-            return NavigationDecision.navigate;
-          },
-        ),
-      )
-      ..loadRequest(Uri.parse(widget.initialUrl));
+    _currentUrl = widget.initialUrl;
   }
 
   /// Runs JS to detect the most relevant media link on the current page.
   Future<String?> _getRealLink() async {
+    if (_controller == null) return null;
+
     const script = """
       (function() {
         var currentUrl = window.location.href;
@@ -172,9 +150,8 @@ class _WebViewScreenState extends State<WebViewScreen> {
     """;
 
     try {
-      final result = await _controller.runJavaScriptReturningResult(script);
-      if (result.toString() != 'null' &&
-          result.toString() != '""') {
+      final result = await _controller!.evaluateJavascript(source: script);
+      if (result.toString() != 'null' && result.toString() != '""') {
         return result.toString().replaceAll('"', '');
       }
     } catch (e) {
@@ -201,12 +178,9 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
     // Fallback to current URL
     if (target == null || target.isEmpty) {
-      try {
-        final current = await _controller.currentUrl();
-        if (current != null && current.toLowerCase().startsWith('http')) {
-          target = current.trim();
-        }
-      } catch (_) {}
+      if (_currentUrl.toLowerCase().startsWith('http')) {
+        target = _currentUrl.trim();
+      }
     }
 
     // Block generic home URLs
@@ -225,17 +199,49 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
     debugPrint("🎯 Sending to backend: $target");
 
-    // Extract cookies from WebView for authenticated downloads (e.g. stories)
+    // Extract cookies using our existing CookieService logic
+    // Since we are now using InAppWebView, we can also use CookieManager directly here
+    // But for consistency let's use the CookieService which is already set up to use InAppWebView's CookieManager
+    // However, CookieService expects a WebViewController (webview_flutter).
+    // Let's UPDATE CookieService to accept InAppWebViewController or just use the static CookieManager logic directly here
+    // to avoid circular dependency or type mismatches.
+    
+    // We already updated CookieService to use `inapp.CookieManager.instance()`.
+    // It doesn't actually Use `WebViewController` argument for anything other than getting current URL.
+    // So we can just use the static logic here.
+
     String? cookies;
     try {
-      cookies = await CookieService.extractCookiesBase64(_controller);
-      if (cookies != null) {
-        debugPrint("🍪 Cookies extracted for download");
-      } else {
-        debugPrint("🍪 Cookie extraction returned null");
+      // Direct cookie extraction using InAppWebView's CookieManager
+      final cookieManager = CookieManager.instance();
+      final cookiesList = await cookieManager.getCookies(url: WebUri(target));
+      
+      if (cookiesList.isNotEmpty) {
+         // Convert to Netscape format (duplicate logic from CookieService, but cleaner to inline for now)
+         // Actually, let's just reuse the logic from CookieService but we need to pass the controller?
+         // No, let's copy the logic here to keep it self-contained and avoid refactoring CookieService again right now.
+         
+         final buffer = StringBuffer();
+         buffer.writeln('# Netscape HTTP Cookie File');
+         final uri = Uri.parse(target);
+         final domain = uri.host;
+         
+         for (final cookie in cookiesList) {
+            final name = cookie.name;
+            final value = cookie.value;
+            final rootDomain = domain.startsWith('www.') ? domain.substring(3) : '.$domain';
+            final isSecure = cookie.isSecure ?? true;
+            buffer.writeln('$rootDomain\tTRUE\t/\t${isSecure ? "TRUE" : "FALSE"}\t0\t$name\t$value');
+         }
+         
+         final netscapeCookies = buffer.toString();
+         if (netscapeCookies.trim() != '# Netscape HTTP Cookie File') {
+            cookies = base64Encode(utf8.encode(netscapeCookies));
+            debugPrint("🍪 Cookies extracted successfully via InAppWebView");
+         }
       }
     } catch (e) {
-      debugPrint("🍪 Cookie extraction FAILED: $e");
+      debugPrint("🍪 Cookie extraction error: $e");
     }
 
     if (mounted) {
@@ -254,10 +260,55 @@ class _WebViewScreenState extends State<WebViewScreen> {
       appBar: AppBar(title: Text(widget.title), elevation: 0),
       body: Stack(
         children: [
-          WebViewWidget(controller: _controller),
-          DraggableFab(onPressed: _handleDownload),
+          InAppWebView(
+            initialUrlRequest: URLRequest(url: WebUri(widget.initialUrl)),
+            initialSettings: InAppWebViewSettings(
+              javaScriptEnabled: true,
+              useHybridComposition: true, // Forces correct Z-ordering on Android
+              allowsInlineMediaPlayback: true,
+            ),
+            onWebViewCreated: (controller) {
+              _controller = controller;
+            },
+            onLoadStop: (controller, url) {
+              if (url != null) {
+                setState(() {
+                  _currentUrl = url.toString();
+                });
+              }
+            },
+            onUpdateVisitedHistory: (controller, url, androidIsReload) {
+              if (url != null) {
+                _currentUrl = url.toString();
+              }
+            },
+            shouldOverrideUrlLoading: (controller, navigationAction) async {
+              final uri = navigationAction.request.url;
+              if (uri == null) return NavigationActionPolicy.CANCEL;
+
+              final url = uri.toString().toLowerCase();
+
+              // Block deep-links
+              if (url.startsWith('intent://') ||
+                  url.startsWith('market://') ||
+                  url.contains('play.google.com') ||
+                  url.contains('itunes.apple.com')) {
+                return NavigationActionPolicy.CANCEL;
+              }
+              
+              if (!url.startsWith('http')) {
+                 return NavigationActionPolicy.CANCEL;
+              }
+
+              return NavigationActionPolicy.ALLOW;
+            },
+          ),
+          SafeArea(
+            child: DraggableFab(onPressed: _handleDownload),
+          ),
         ],
       ),
     );
   }
 }
+
