@@ -254,57 +254,86 @@ class _WebViewScreenState extends State<WebViewScreen> {
     }
   }
 
+  Future<bool> _handleBack() async {
+    if (_controller != null && await _controller!.canGoBack()) {
+      await _controller!.goBack();
+      return false; // don't pop the route
+    }
+    return true; // nothing to go back to, pop
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(widget.title), elevation: 0),
-      body: Stack(
-        children: [
-          InAppWebView(
-            initialUrlRequest: URLRequest(url: WebUri(widget.initialUrl)),
-            initialSettings: InAppWebViewSettings(
-              javaScriptEnabled: true,
-              useHybridComposition: true, // Forces correct Z-ordering on Android
-              allowsInlineMediaPlayback: true,
-            ),
-            onWebViewCreated: (controller) {
-              _controller = controller;
-            },
-            onLoadStop: (controller, url) {
-              if (url != null) {
-                setState(() {
-                  _currentUrl = url.toString();
-                });
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final shouldPop = await _handleBack();
+        if (shouldPop && context.mounted) {
+          Navigator.of(context).pop();
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.title),
+          elevation: 0,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () async {
+              final shouldPop = await _handleBack();
+              if (shouldPop && context.mounted) {
+                Navigator.of(context).pop();
               }
-            },
-            onUpdateVisitedHistory: (controller, url, androidIsReload) {
-              if (url != null) {
-                _currentUrl = url.toString();
-              }
-            },
-            shouldOverrideUrlLoading: (controller, navigationAction) async {
-              final uri = navigationAction.request.url;
-              if (uri == null) return NavigationActionPolicy.CANCEL;
-
-              final url = uri.toString().toLowerCase();
-
-              // Block deep-links
-              if (url.startsWith('intent://') ||
-                  url.startsWith('market://') ||
-                  url.contains('play.google.com') ||
-                  url.contains('itunes.apple.com')) {
-                return NavigationActionPolicy.CANCEL;
-              }
-              
-              if (!url.startsWith('http')) {
-                 return NavigationActionPolicy.CANCEL;
-              }
-
-              return NavigationActionPolicy.ALLOW;
             },
           ),
-          DraggableFab(onPressed: _handleDownload),
-        ],
+        ),
+        body: Stack(
+          children: [
+            InAppWebView(
+              initialUrlRequest: URLRequest(url: WebUri(widget.initialUrl)),
+              initialSettings: InAppWebViewSettings(
+                javaScriptEnabled: true,
+                useHybridComposition: true,
+                allowsInlineMediaPlayback: true,
+              ),
+              onWebViewCreated: (controller) {
+                _controller = controller;
+              },
+              onLoadStop: (controller, url) {
+                if (url != null) {
+                  setState(() {
+                    _currentUrl = url.toString();
+                  });
+                }
+              },
+              onUpdateVisitedHistory: (controller, url, androidIsReload) {
+                if (url != null) {
+                  _currentUrl = url.toString();
+                }
+              },
+              shouldOverrideUrlLoading: (controller, navigationAction) async {
+                final uri = navigationAction.request.url;
+                if (uri == null) return NavigationActionPolicy.CANCEL;
+
+                final url = uri.toString().toLowerCase();
+
+                if (url.startsWith('intent://') ||
+                    url.startsWith('market://') ||
+                    url.contains('play.google.com') ||
+                    url.contains('itunes.apple.com')) {
+                  return NavigationActionPolicy.CANCEL;
+                }
+
+                if (!url.startsWith('http')) {
+                  return NavigationActionPolicy.CANCEL;
+                }
+
+                return NavigationActionPolicy.ALLOW;
+              },
+            ),
+            DraggableFab(onPressed: _handleDownload),
+          ],
+        ),
       ),
     );
   }
