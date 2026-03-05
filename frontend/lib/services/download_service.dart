@@ -37,8 +37,12 @@ class DownloadService {
   }) async {
     if (url.isEmpty) return;
 
-    TopMessageBar.show(context, "⏳ Analyzing…", duration: const Duration(seconds: 2));
-    onStatusChange?.call("Preparing…");
+    final bool callerHandlesUI = onStatusChange != null;
+
+    if (!callerHandlesUI) {
+      TopMessageBar.show(context, "⏳ Analyzing…", duration: const Duration(seconds: 2));
+    }
+    onStatusChange?.call("Analyzing…");
 
     final int notificationId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
@@ -94,18 +98,14 @@ class DownloadService {
         final savePath = "${appDir.path}/$fileName";
 
         // ── Step 3: Download directly from source (client-side) ──
-        if (context.mounted) {
-           String msg = isMultiple 
-              ? "⬇️ Downloading ${i + 1}/$totalItems…" 
-              : "⬇️ Downloading $mediaType…";
-           
-           TopMessageBar.show(
-              context,
-              msg,
-              duration: const Duration(seconds: 2),
-           );
+        final downloadLabel = isMultiple
+            ? "Downloading ${i + 1}/$totalItems…"
+            : "Downloading $mediaType…";
+
+        if (!callerHandlesUI && context.mounted) {
+           TopMessageBar.show(context, "⬇️ $downloadLabel", duration: const Duration(seconds: 2));
         }
-        onStatusChange?.call(isMultiple ? "Downloading ${i + 1}/$totalItems…" : "Downloading $mediaType…");
+        onStatusChange?.call(downloadLabel);
 
         await _dio.download(
           currentUrl,
@@ -133,16 +133,16 @@ class DownloadService {
         NotificationService.showCompletion(notificationId + i, fileName, savePath);
       }
 
-      if (context.mounted) {
-        TopMessageBar.show(
-          context,
-          totalItems > 1 ? "✅ All $totalItems items downloaded!" : "✅ Download Complete!",
-          backgroundColor: Colors.green,
-          duration: const Duration(seconds: 2),
-        );
+      final doneMsg = totalItems > 1
+          ? "All $totalItems items downloaded!"
+          : "Download Complete!";
+
+      if (!callerHandlesUI && context.mounted) {
+        TopMessageBar.show(context, "✅ $doneMsg",
+            backgroundColor: Colors.green, duration: const Duration(seconds: 2));
       }
       onProgress?.call(100);
-      onStatusChange?.call("Completed");
+      onStatusChange?.call("✅ $doneMsg");
       onComplete?.call();
 
     } catch (e) {
@@ -169,7 +169,7 @@ class DownloadService {
 
       final isCancelled = errorMessage == "Download cancelled";
 
-      if (context.mounted) {
+      if (!callerHandlesUI && context.mounted) {
         TopMessageBar.show(
           context,
           errorMessage,
@@ -178,7 +178,7 @@ class DownloadService {
         );
       }
 
-      onStatusChange?.call(errorMessage);
+      onStatusChange?.call("❌ $errorMessage");
     }
   }
 }

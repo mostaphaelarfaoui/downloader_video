@@ -161,12 +161,10 @@ class _WebViewScreenState extends State<WebViewScreen> {
   }
 
   void _handleDownload() async {
-    TopMessageBar.show(context, "🔍 Detecting media…",
-        duration: const Duration(milliseconds: 500));
+    final status = TopMessageBar.showPersistent(context, "🔍 Detecting media…");
 
     String? target = await _getRealLink();
 
-    // Normalize
     if (target != null) {
       final t = target.trim();
       if (!t.toLowerCase().startsWith('http')) {
@@ -176,17 +174,16 @@ class _WebViewScreenState extends State<WebViewScreen> {
       }
     }
 
-    // Fallback to current URL
     if (target == null || target.isEmpty) {
       if (_currentUrl.toLowerCase().startsWith('http')) {
         target = _currentUrl.trim();
       }
     }
 
-    // Block generic home URLs
     if (target == null ||
         target.trim() == "https://www.tiktok.com/" ||
         target.trim() == "https://www.instagram.com/") {
+      status.dismiss();
       if (mounted) {
         TopMessageBar.show(
           context,
@@ -199,56 +196,63 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
     debugPrint("🎯 Sending to backend: $target");
 
-    // Extract cookies using our existing CookieService logic
-    // Since we are now using InAppWebView, we can also use CookieManager directly here
-    // But for consistency let's use the CookieService which is already set up to use InAppWebView's CookieManager
-    // However, CookieService expects a WebViewController (webview_flutter).
-    // Let's UPDATE CookieService to accept InAppWebViewController or just use the static CookieManager logic directly here
-    // to avoid circular dependency or type mismatches.
-    
-    // We already updated CookieService to use `inapp.CookieManager.instance()`.
-    // It doesn't actually Use `WebViewController` argument for anything other than getting current URL.
-    // So we can just use the static logic here.
-
     String? cookies;
     try {
-      // Direct cookie extraction using InAppWebView's CookieManager
       final cookieManager = CookieManager.instance();
       final cookiesList = await cookieManager.getCookies(url: WebUri(target));
-      
+
       if (cookiesList.isNotEmpty) {
-         // Convert to Netscape format (duplicate logic from CookieService, but cleaner to inline for now)
-         // Actually, let's just reuse the logic from CookieService but we need to pass the controller?
-         // No, let's copy the logic here to keep it self-contained and avoid refactoring CookieService again right now.
-         
-         final buffer = StringBuffer();
-         buffer.writeln('# Netscape HTTP Cookie File');
-         final uri = Uri.parse(target);
-         final domain = uri.host;
-         
-         for (final cookie in cookiesList) {
-            final name = cookie.name;
-            final value = cookie.value;
-            final rootDomain = domain.startsWith('www.') ? domain.substring(3) : '.$domain';
-            final isSecure = cookie.isSecure ?? true;
-            buffer.writeln('$rootDomain\tTRUE\t/\t${isSecure ? "TRUE" : "FALSE"}\t0\t$name\t$value');
-         }
-         
-         final netscapeCookies = buffer.toString();
-         if (netscapeCookies.trim() != '# Netscape HTTP Cookie File') {
-            cookies = base64Encode(utf8.encode(netscapeCookies));
-            debugPrint("🍪 Cookies extracted successfully via InAppWebView");
-         }
+        final buffer = StringBuffer();
+        buffer.writeln('# Netscape HTTP Cookie File');
+        final uri = Uri.parse(target);
+        final domain = uri.host;
+
+        for (final cookie in cookiesList) {
+          final name = cookie.name;
+          final value = cookie.value;
+          final rootDomain = domain.startsWith('www.')
+              ? domain.substring(3)
+              : '.$domain';
+          final isSecure = cookie.isSecure ?? true;
+          buffer.writeln(
+              '$rootDomain\tTRUE\t/\t${isSecure ? "TRUE" : "FALSE"}\t0\t$name\t$value');
+        }
+
+        final netscapeCookies = buffer.toString();
+        if (netscapeCookies.trim() != '# Netscape HTTP Cookie File') {
+          cookies = base64Encode(utf8.encode(netscapeCookies));
+          debugPrint("🍪 Cookies extracted successfully via InAppWebView");
+        }
       }
     } catch (e) {
       debugPrint("🍪 Cookie extraction error: $e");
     }
 
     if (mounted) {
-      DownloadService.startDownload(
+      await DownloadService.startDownload(
         context,
         target,
         cookies: cookies,
+        onStatusChange: (msg) {
+          if (!status.isShowing) return;
+          if (msg.startsWith('✅')) {
+            status.dismiss(
+                finalMessage: msg, backgroundColor: Colors.green);
+          } else if (msg.startsWith('❌')) {
+            status.dismiss(
+                finalMessage: msg, backgroundColor: Colors.redAccent);
+          } else {
+            status.update("⏳ $msg");
+          }
+        },
+        onProgress: (percent) {
+          if (!status.isShowing) return;
+          status.update(
+            "⬇️ Downloading… $percent%",
+            showProgress: true,
+            progress: percent,
+          );
+        },
         onComplete: widget.onDownloadComplete,
       );
     }
